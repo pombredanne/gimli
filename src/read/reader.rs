@@ -1,12 +1,20 @@
-use borrow::Cow;
+use crate::borrow::Cow;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::ops::{Add, AddAssign, Sub};
 
-use common::Format;
-use endianity::Endianity;
-use leb128;
-use read::{Error, Result};
+use crate::common::Format;
+use crate::endianity::Endianity;
+use crate::leb128;
+use crate::read::{Error, Result};
+
+/// An identifier for an offset within a section reader.
+///
+/// This is used for error reporting. The meaning of this value is specific to
+/// each reader implementation. The values should be chosen to be unique amongst
+/// all readers. If values are not unique then errors may point to the wrong reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReaderOffsetId(pub u64);
 
 /// A trait for offsets with a DWARF section.
 ///
@@ -221,6 +229,13 @@ pub trait Reader: Debug + Clone {
     /// May panic if this reader's data is not contained within the given
     /// base reader's data.
     fn offset_from(&self, base: &Self) -> Self::Offset;
+
+    /// Return an identifier for the current reader offset.
+    fn offset_id(&self) -> ReaderOffsetId;
+
+    /// Return the offset corresponding to the given `id` if
+    /// it is associated with this reader.
+    fn lookup_offset_id(&self, id: ReaderOffsetId) -> Option<Self::Offset>;
 
     /// Find the index of the first occurence of the given byte.
     /// The offset of the reader is not changed.

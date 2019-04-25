@@ -1,13 +1,13 @@
+use crate::vec::Vec;
 use indexmap::{IndexMap, IndexSet};
 use std::ops::{Deref, DerefMut};
-use vec::Vec;
 
-use common::{DebugLineOffset, Encoding, Format, LineEncoding};
-use constants;
-use leb128;
-use write::{
+use crate::common::{DebugLineOffset, Encoding, Format, LineEncoding, SectionId};
+use crate::constants;
+use crate::leb128;
+use crate::write::{
     Address, DebugLineStrOffsets, DebugStrOffsets, Error, LineStringId, LineStringTable, Result,
-    Section, SectionId, StringId, Writer,
+    Section, StringId, Writer,
 };
 
 /// The number assigned to the first special opcode.
@@ -39,9 +39,13 @@ pub struct LineProgram {
     /// If a path is a relative, then the file is located relative to the
     /// directory. Otherwise the directory is meaningless.
     ///
-    /// For version >= 5, the first entry is for the primary source file
-    /// of the compilation unit.
+    /// Does not include comp_file, even for version >= 5.
     files: IndexMap<(LineString, DirectoryId), FileInfo>,
+
+    /// The primary source file of the compilation unit.
+    /// This is required for version >= 5, but we never reference it elsewhere
+    /// because DWARF defines DW_AT_decl_file=0 to mean not specified.
+    comp_file: (LineString, FileInfo),
 
     /// True if the file entries may have valid timestamps.
     ///
@@ -109,8 +113,9 @@ impl LineProgram {
             line_encoding,
             directories: IndexSet::new(),
             files: IndexMap::new(),
+            comp_file: (comp_file, comp_file_info.unwrap_or_default()),
             prev_row: LineRow::initial_state(line_encoding),
-            row: LineRow::new(encoding.version, line_encoding),
+            row: LineRow::initial_state(line_encoding),
             instructions: Vec::new(),
             in_sequence: false,
             file_has_timestamp: false,
@@ -120,13 +125,7 @@ impl LineProgram {
         // For all DWARF versions, directory index 0 is comp_dir.
         // For version <= 4, the entry is implicit. We still add
         // it here so that we use it, but we don't emit it.
-        let dir = program.add_directory(comp_dir);
-        // For DWARF version >= 5, file index 0 is comp_name.
-        // For version <= 4, file index 0 is invalid. We potentially could
-        // add comp_name as index 1, but don't in case it is unused.
-        if encoding.version >= 5 {
-            program.add_file(comp_file, dir, comp_file_info);
-        }
+        program.add_directory(comp_dir);
         program
     }
 
@@ -148,8 +147,9 @@ impl LineProgram {
             line_encoding,
             directories: IndexSet::new(),
             files: IndexMap::new(),
+            comp_file: (LineString::String(Vec::new()), FileInfo::default()),
             prev_row: LineRow::initial_state(line_encoding),
-            row: LineRow::new(2, line_encoding),
+            row: LineRow::initial_state(line_encoding),
             instructions: Vec::new(),
             in_sequence: false,
             file_has_timestamp: false,
@@ -260,7 +260,7 @@ impl LineProgram {
             entry.or_insert(FileInfo::default());
             index
         };
-        FileId::new(index, self.version())
+        FileId::new(index)
     }
 
     /// Get a reference to a file entry.
@@ -269,10 +269,14 @@ impl LineProgram {
     ///
     /// Panics if `id` is invalid.
     pub fn get_file(&self, id: FileId) -> (&LineString, DirectoryId) {
-        self.files
-            .get_index(id.index(self.version()))
-            .map(|entry| (&(entry.0).0, (entry.0).1))
-            .unwrap()
+        match id.index() {
+            None => (&self.comp_file.0, DirectoryId(0)),
+            Some(index) => self
+                .files
+                .get_index(index)
+                .map(|entry| (&(entry.0).0, (entry.0).1))
+                .unwrap(),
+        }
     }
 
     /// Get a reference to the info for a file entry.
@@ -281,10 +285,10 @@ impl LineProgram {
     ///
     /// Panics if `id` is invalid.
     pub fn get_file_info(&self, id: FileId) -> &FileInfo {
-        self.files
-            .get_index(id.index(self.version()))
-            .map(|entry| entry.1)
-            .unwrap()
+        match id.index() {
+            None => &self.comp_file.1,
+            Some(index) => self.files.get_index(index).map(|entry| entry.1).unwrap(),
+        }
     }
 
     /// Get a mutable reference to the info for a file entry.
@@ -293,10 +297,14 @@ impl LineProgram {
     ///
     /// Panics if `id` is invalid.
     pub fn get_file_info_mut(&mut self, id: FileId) -> &mut FileInfo {
-        self.files
-            .get_index_mut(id.index(self.encoding.version))
-            .map(|entry| entry.1)
-            .unwrap()
+        match id.index() {
+            None => &mut self.comp_file.1,
+            Some(index) => self
+                .files
+                .get_index_mut(index)
+                .map(|entry| entry.1)
+                .unwrap(),
+        }
     }
 
     /// Begin a new sequence and set its base address.
@@ -330,7 +338,7 @@ impl LineProgram {
         }
         self.instructions.push(LineInstruction::EndSequence);
         self.prev_row = LineRow::initial_state(self.line_encoding);
-        self.row = LineRow::new(self.version(), self.line_encoding);
+        self.row = LineRow::initial_state(self.line_encoding);
     }
 
     /// Return true if a sequence has begun.
@@ -512,7 +520,7 @@ impl LineProgram {
         }
 
         let header_length_offset = w.len();
-        w.write_word(0, self.format().word_size())?;
+        w.write_udata(0, self.format().word_size())?;
         let header_length_base = w.len();
 
         w.write_u8(self.line_encoding.minimum_instruction_length)?;
@@ -562,7 +570,7 @@ impl LineProgram {
             w.write_u8(1)?;
             w.write_uleb128(u64::from(constants::DW_LNCT_path.0))?;
             let dir_form = self.directories.get_index(0).unwrap().form();
-            w.write_uleb128(u64::from(dir_form.0))?;
+            w.write_uleb128(dir_form.0)?;
 
             // Directory entries.
             w.write_uleb128(self.directories.len() as u64)?;
@@ -583,26 +591,26 @@ impl LineProgram {
                 + if self.file_has_md5 { 1 } else { 0 };
             w.write_u8(count)?;
             w.write_uleb128(u64::from(constants::DW_LNCT_path.0))?;
-            let file_form = (self.files.get_index(0).unwrap().0).0.form();
-            w.write_uleb128(u64::from(file_form.0))?;
+            let file_form = self.comp_file.0.form();
+            w.write_uleb128(file_form.0)?;
             w.write_uleb128(u64::from(constants::DW_LNCT_directory_index.0))?;
-            w.write_uleb128(u64::from(constants::DW_FORM_udata.0))?;
+            w.write_uleb128(constants::DW_FORM_udata.0)?;
             if self.file_has_timestamp {
                 w.write_uleb128(u64::from(constants::DW_LNCT_timestamp.0))?;
-                w.write_uleb128(u64::from(constants::DW_FORM_udata.0))?;
+                w.write_uleb128(constants::DW_FORM_udata.0)?;
             }
             if self.file_has_size {
                 w.write_uleb128(u64::from(constants::DW_LNCT_size.0))?;
-                w.write_uleb128(u64::from(constants::DW_FORM_udata.0))?;
+                w.write_uleb128(constants::DW_FORM_udata.0)?;
             }
             if self.file_has_md5 {
                 w.write_uleb128(u64::from(constants::DW_LNCT_MD5.0))?;
-                w.write_uleb128(u64::from(constants::DW_FORM_data16.0))?;
+                w.write_uleb128(constants::DW_FORM_data16.0)?;
             }
 
             // File name entries.
-            w.write_uleb128(self.files.len() as u64)?;
-            for ((file, dir), info) in self.files.iter() {
+            w.write_uleb128(self.files.len() as u64 + 1)?;
+            let mut write_file = |file: &LineString, dir: DirectoryId, info: &FileInfo| {
                 file.write(
                     w,
                     file_form,
@@ -620,11 +628,16 @@ impl LineProgram {
                 if self.file_has_md5 {
                     w.write(&info.md5)?;
                 }
+                Ok(())
+            };
+            write_file(&self.comp_file.0, DirectoryId(0), &self.comp_file.1)?;
+            for ((file, dir), info) in self.files.iter() {
+                write_file(file, *dir, info)?;
             }
         }
 
         let header_length = (w.len() - header_length_base) as u64;
-        w.write_word_at(
+        w.write_udata_at(
             header_length_offset,
             header_length,
             self.format().word_size(),
@@ -702,13 +715,6 @@ impl LineRow {
 
             isa: 0,
         }
-    }
-
-    fn new(version: u16, line_encoding: LineEncoding) -> Self {
-        let mut row = LineRow::initial_state(line_encoding);
-        // This is a safer default than FileId(1) if version >= 5.
-        row.file = FileId::new(0, version);
-        row
     }
 }
 
@@ -884,38 +890,38 @@ pub struct DirectoryId(usize);
 // Force FileId access via the methods.
 mod id {
     /// An identifier for a file in a `LineProgram`.
-    ///
-    /// Defaults to the primary source file of the compilation unit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct FileId(usize);
 
     impl FileId {
-        pub(crate) fn new(index: usize, version: u16) -> Self {
-            if version <= 4 {
-                FileId(index + 1)
-            } else {
-                FileId(index)
-            }
+        /// Create a FileId given an index into `LineProgram::files`.
+        pub(crate) fn new(index: usize) -> Self {
+            FileId(index + 1)
         }
 
         /// The index of the file in `LineProgram::files`.
-        pub(crate) fn index(self, version: u16) -> usize {
-            if version <= 4 {
-                // There's never a FileId(0) for version <= 4.
-                self.0 - 1
+        pub(super) fn index(self) -> Option<usize> {
+            if self.0 == 0 {
+                None
             } else {
-                self.0
+                Some(self.0 - 1)
             }
         }
 
         /// The initial state of the file register.
-        pub(crate) fn initial_state() -> Self {
+        pub(super) fn initial_state() -> Self {
             FileId(1)
         }
 
         /// The raw value used when writing.
         pub(crate) fn raw(self) -> u64 {
             self.0 as u64
+        }
+
+        /// The id for file index 0 in DWARF version 5.
+        /// Only used when converting.
+        pub(super) fn zero() -> Self {
+            FileId(0)
         }
     }
 }
@@ -946,19 +952,19 @@ define_section!(
 #[cfg(feature = "read")]
 mod convert {
     use super::*;
-    use read::{self, Reader};
-    use write::{self, ConvertError, ConvertResult};
+    use crate::read::{self, Reader};
+    use crate::write::{self, ConvertError, ConvertResult};
 
     impl LineProgram {
         /// Create a line number program by reading the data from the given program.
         ///
         /// Return the program and a mapping from file index to `FileId`.
         pub fn from<R: Reader<Offset = usize>>(
-            mut from_program: read::IncompleteLineProgram<R, R::Offset>,
+            mut from_program: read::IncompleteLineProgram<R>,
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &Fn(u64) -> Option<Address>,
+            convert_address: &dyn Fn(u64) -> Option<Address>,
         ) -> ConvertResult<(LineProgram, Vec<FileId>)> {
             // Create mappings in case the source has duplicate files or directories.
             let mut dirs = Vec::new();
@@ -997,12 +1003,19 @@ mod convert {
                     Some(comp_file_info),
                 );
 
+                let file_skip;
                 if from_header.version() <= 4 {
-                    // Define the index 0 entries.
-                    // A file index of 0 is invalid for version <= 4, but
-                    // putting something there makes the indexing easier.
+                    // The first directory is implicit.
                     dirs.push(DirectoryId(0));
-                    files.push(FileId::new(0, from_header.version()));
+                    // A file index of 0 is invalid for version <= 4, but putting
+                    // something there makes the indexing easier.
+                    file_skip = 0;
+                    files.push(FileId::zero());
+                } else {
+                    // We don't add the first file to `files`, but still allow
+                    // it to be referenced from converted instructions.
+                    file_skip = 1;
+                    files.push(FileId::zero());
                 }
 
                 for from_dir in from_header.include_directories() {
@@ -1014,7 +1027,7 @@ mod convert {
                 program.file_has_timestamp = from_header.file_has_timestamp();
                 program.file_has_size = from_header.file_has_size();
                 program.file_has_md5 = from_header.file_has_md5();
-                for from_file in from_header.file_names() {
+                for from_file in from_header.file_names().iter().skip(file_skip) {
                     let from_name =
                         LineString::from(from_file.path_name(), dwarf, line_strings, strings)?;
                     let from_dir = from_file.directory_index();
@@ -1069,6 +1082,9 @@ mod convert {
                                     if file >= files.len() as u64 {
                                         return Err(ConvertError::InvalidFileIndex);
                                     }
+                                    if file == 0 && program.version() <= 4 {
+                                        return Err(ConvertError::InvalidFileIndex);
+                                    }
                                     files[file as usize]
                                 };
                                 program.row().line = from_row.line().unwrap_or(0);
@@ -1095,7 +1111,7 @@ mod convert {
 
     impl LineString {
         fn from<R: Reader<Offset = usize>>(
-            from_attr: read::AttributeValue<R, R::Offset>,
+            from_attr: read::AttributeValue<R>,
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
@@ -1121,9 +1137,9 @@ mod convert {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use read;
-    use write::{DebugLineStr, DebugStr, EndianVec, StringTable};
-    use LittleEndian;
+    use crate::read;
+    use crate::write::{DebugLineStr, DebugStr, EndianVec, StringTable};
+    use crate::LittleEndian;
 
     #[test]
     fn test_line_program_table() {
@@ -1209,7 +1225,7 @@ mod tests {
 
         let read_debug_line = read::DebugLine::new(debug_line.slice(), LittleEndian);
 
-        let convert_address = &|address| Some(Address::Absolute(address));
+        let convert_address = &|address| Some(Address::Constant(address));
         for ((program, file_id, encoding), offset) in programs.iter().zip(debug_line_offsets.iter())
         {
             let read_program = read_debug_line
@@ -1236,7 +1252,7 @@ mod tests {
             assert_eq!(convert_program.address_size(), program.address_size());
             assert_eq!(convert_program.format(), program.format());
 
-            let convert_file_id = convert_files[file_id.index(encoding.version)];
+            let convert_file_id = convert_files[file_id.raw() as usize];
             let (file, dir) = program.get_file(*file_id);
             let (convert_file, convert_dir) = convert_program.get_file(convert_file_id);
             assert_eq!(file, convert_file);
@@ -1256,7 +1272,7 @@ mod tests {
         let dir1 = &b"dir1"[..];
         let file1 = &b"file1"[..];
         let file2 = &b"file2"[..];
-        let convert_address = &|address| Some(Address::Absolute(address));
+        let convert_address = &|address| Some(Address::Constant(address));
 
         let debug_line_str_offsets = DebugLineStrOffsets::none();
         let debug_str_offsets = DebugStrOffsets::none();
@@ -1291,7 +1307,7 @@ mod tests {
                     // Test sequences.
                     {
                         let mut program = program.clone();
-                        let address = Address::Absolute(0x12);
+                        let address = Address::Constant(0x12);
                         program.begin_sequence(Some(address));
                         assert_eq!(
                             program.instructions,
@@ -1328,7 +1344,7 @@ mod tests {
                     // Create test cases.
                     let mut tests = Vec::new();
 
-                    let mut row = base_row;
+                    let row = base_row;
                     tests.push((row, vec![LineInstruction::Copy]));
 
                     let mut row = base_row;
@@ -1641,7 +1657,7 @@ mod tests {
                             read::LineInstruction::EndSequence,
                         ),
                         (
-                            LineInstruction::SetAddress(Address::Absolute(0x12)),
+                            LineInstruction::SetAddress(Address::Constant(0x12)),
                             read::LineInstruction::SetAddress(0x12),
                         ),
                         (
@@ -1724,7 +1740,7 @@ mod tests {
                             None,
                         );
                         for address_advance in addresses.clone() {
-                            program.begin_sequence(Some(Address::Absolute(0x1000)));
+                            program.begin_sequence(Some(Address::Constant(0x1000)));
                             program.row().line = 0x10000;
                             program.generate_row();
                             for line_advance in lines.clone() {

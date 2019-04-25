@@ -1,9 +1,9 @@
-use common::{DebugAddrBase, DebugAddrIndex};
-use read::{Reader, ReaderOffset, Result, Section};
+use crate::common::{DebugAddrBase, DebugAddrIndex, SectionId};
+use crate::read::{Reader, ReaderOffset, Result, Section};
 
 /// The raw contents of the `.debug_addr` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugAddr<R: Reader> {
+pub struct DebugAddr<R> {
     section: R,
 }
 
@@ -40,13 +40,41 @@ impl<R: Reader> DebugAddr<R> {
     }
 }
 
-impl<R: Reader> Section<R> for DebugAddr<R> {
-    fn section_name() -> &'static str {
-        ".debug_addr"
+impl<T> DebugAddr<T> {
+    /// Create a `DebugAddr` section that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```rust,no_run
+    /// # let load_section = || unimplemented!();
+    /// // Read the DWARF section into a `Vec` with whatever object loader you're using.
+    /// let owned_section: gimli::DebugAddr<Vec<u8>> = load_section();
+    /// // Create a reference to the DWARF section.
+    /// let section = owned_section.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> DebugAddr<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        borrow(&self.section).into()
     }
 }
 
-impl<R: Reader> From<R> for DebugAddr<R> {
+impl<R> Section<R> for DebugAddr<R> {
+    fn id() -> SectionId {
+        SectionId::DebugAddr
+    }
+
+    fn reader(&self) -> &R {
+        &self.section
+    }
+}
+
+impl<R> From<R> for DebugAddr<R> {
     fn from(section: R) -> Self {
         DebugAddr { section }
     }
@@ -54,13 +82,11 @@ impl<R: Reader> From<R> for DebugAddr<R> {
 
 #[cfg(test)]
 mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::{Endian, Label, LabelMaker, Section};
     use super::*;
-    use read::EndianSlice;
-    use test_util::GimliSectionMethods;
-    use {Format, LittleEndian};
+    use crate::read::EndianSlice;
+    use crate::test_util::GimliSectionMethods;
+    use crate::{Format, LittleEndian};
+    use test_assembler::{Endian, Label, LabelMaker, Section};
 
     #[test]
     fn test_get_address() {

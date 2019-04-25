@@ -1,7 +1,7 @@
-use vec::Vec;
+use crate::vec::Vec;
 
-use common::Encoding;
-use write::{
+use crate::common::Encoding;
+use crate::write::{
     AbbreviationTable, LineProgram, LineStringTable, Result, Sections, StringTable, Unit,
     UnitTable, Writer,
 };
@@ -27,6 +27,12 @@ pub struct Dwarf {
 }
 
 impl Dwarf {
+    /// Create a new `Dwarf` instance.
+    #[inline]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Write the DWARF information to the given sections.
     pub fn write<W: Writer>(&mut self, sections: &mut Sections<W>) -> Result<()> {
         let line_strings = self.line_strings.write(&mut sections.debug_line_str)?;
@@ -101,20 +107,20 @@ impl DwarfUnit {
 #[cfg(feature = "read")]
 pub(crate) mod convert {
     use super::*;
-    use read::{self, Reader};
-    use write::{Address, ConvertResult};
+    use crate::read::{self, Reader};
+    use crate::write::{Address, ConvertResult};
 
     impl Dwarf {
         /// Create a `write::Dwarf` by converting a `read::Dwarf`.
         ///
         /// `convert_address` is a function to convert read addresses into the `Address`
         /// type. For non-relocatable addresses, this function may simply return
-        /// `Address::Absolute(address)`. For relocatable addresses, it is the caller's
+        /// `Address::Constant(address)`. For relocatable addresses, it is the caller's
         /// responsibility to determine the symbol and addend corresponding to the address
-        /// and return `Address::Relative { symbol, addend }`.
+        /// and return `Address::Symbol { symbol, addend }`.
         pub fn from<R: Reader<Offset = usize>>(
             dwarf: &read::Dwarf<R>,
-            convert_address: &Fn(u64) -> Option<Address>,
+            convert_address: &dyn Fn(u64) -> Option<Address>,
         ) -> ConvertResult<Dwarf> {
             let mut line_strings = LineStringTable::default();
             let mut strings = StringTable::default();

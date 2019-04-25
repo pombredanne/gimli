@@ -1,19 +1,19 @@
 use fallible_iterator::FallibleIterator;
 
-use common::{
+use crate::common::{
     DebugAddrBase, DebugAddrIndex, DebugLocListsBase, DebugLocListsIndex, Encoding, Format,
-    LocationListsOffset,
+    LocationListsOffset, SectionId,
 };
-use constants;
-use endianity::Endianity;
-use read::{
-    DebugAddr, EndianSlice, Error, Expression, Range, RawRange, Reader, ReaderOffset, Result,
-    Section,
+use crate::constants;
+use crate::endianity::Endianity;
+use crate::read::{
+    DebugAddr, EndianSlice, Error, Expression, Range, RawRange, Reader, ReaderOffset,
+    ReaderOffsetId, Result, Section,
 };
 
 /// The raw contents of the `.debug_loc` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugLoc<R: Reader> {
+pub struct DebugLoc<R> {
     pub(crate) section: R,
 }
 
@@ -40,13 +40,17 @@ where
     }
 }
 
-impl<R: Reader> Section<R> for DebugLoc<R> {
-    fn section_name() -> &'static str {
-        ".debug_loc"
+impl<R> Section<R> for DebugLoc<R> {
+    fn id() -> SectionId {
+        SectionId::DebugLoc
+    }
+
+    fn reader(&self) -> &R {
+        &self.section
     }
 }
 
-impl<R: Reader> From<R> for DebugLoc<R> {
+impl<R> From<R> for DebugLoc<R> {
     fn from(section: R) -> Self {
         DebugLoc { section }
     }
@@ -55,7 +59,7 @@ impl<R: Reader> From<R> for DebugLoc<R> {
 /// The `DebugLocLists` struct represents the DWARF data
 /// found in the `.debug_loclists` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugLocLists<R: Reader> {
+pub struct DebugLocLists<R> {
     section: R,
 }
 
@@ -82,13 +86,17 @@ where
     }
 }
 
-impl<R: Reader> Section<R> for DebugLocLists<R> {
-    fn section_name() -> &'static str {
-        ".debug_loclists"
+impl<R> Section<R> for DebugLocLists<R> {
+    fn id() -> SectionId {
+        SectionId::DebugLocLists
+    }
+
+    fn reader(&self) -> &R {
+        &self.section
     }
 }
 
-impl<R: Reader> From<R> for DebugLocLists<R> {
+impl<R> From<R> for DebugLocLists<R> {
     fn from(section: R) -> Self {
         DebugLocLists { section }
     }
@@ -154,12 +162,12 @@ fn parse_header<R: Reader>(input: &mut R) -> Result<LocListsHeader> {
 
 /// The DWARF data found in `.debug_loc` and `.debug_loclists` sections.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct LocationLists<R: Reader> {
+pub struct LocationLists<R> {
     debug_loc: DebugLoc<R>,
     debug_loclists: DebugLocLists<R>,
 }
 
-impl<R: Reader> LocationLists<R> {
+impl<R> LocationLists<R> {
     /// Construct a new `LocationLists` instance from the data in the `.debug_loc` and
     /// `.debug_loclists` sections.
     pub fn new(debug_loc: DebugLoc<R>, debug_loclists: DebugLocLists<R>) -> LocationLists<R> {
@@ -168,7 +176,36 @@ impl<R: Reader> LocationLists<R> {
             debug_loclists,
         }
     }
+}
 
+impl<T> LocationLists<T> {
+    /// Create a `LocationLists` that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```rust,no_run
+    /// # let load_section = || unimplemented!();
+    /// // Read the DWARF section into a `Vec` with whatever object loader you're using.
+    /// let owned_section: gimli::LocationLists<Vec<u8>> = load_section();
+    /// // Create a reference to the DWARF section.
+    /// let section = owned_section.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> LocationLists<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        LocationLists {
+            debug_loc: borrow(&self.debug_loc.section).into(),
+            debug_loclists: borrow(&self.debug_loclists.section).into(),
+        }
+    }
+}
+
+impl<R: Reader> LocationLists<R> {
     /// Iterate over the `LocationListEntry`s starting at the given offset.
     ///
     /// The `unit_encoding` must match the compilation unit that the
@@ -241,6 +278,13 @@ impl<R: Reader> LocationLists<R> {
         input
             .read_offset(format)
             .map(|x| LocationListsOffset(base.0 + x))
+    }
+
+    /// Call `Reader::lookup_offset_id` for each section, and return the first match.
+    pub fn lookup_offset_id(&self, id: ReaderOffsetId) -> Option<(SectionId, R::Offset)> {
+        self.debug_loc
+            .lookup_offset_id(id)
+            .or_else(|| self.debug_loclists.lookup_offset_id(id))
     }
 }
 
@@ -545,13 +589,11 @@ pub struct LocationListEntry<R: Reader> {
 
 #[cfg(test)]
 mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::{Endian, Label, LabelMaker, Section};
     use super::*;
-    use endianity::LittleEndian;
-    use read::{EndianSlice, Range};
-    use test_util::GimliSectionMethods;
+    use crate::endianity::LittleEndian;
+    use crate::read::{EndianSlice, Range};
+    use crate::test_util::GimliSectionMethods;
+    use test_assembler::{Endian, Label, LabelMaker, Section};
 
     #[test]
     fn test_loclists_32() {
@@ -573,7 +615,7 @@ mod tests {
         let start = Label::new();
         let first = Label::new();
         let size = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // Header
             .mark(&start)
@@ -802,7 +844,7 @@ mod tests {
         let start = Label::new();
         let first = Label::new();
         let size = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // Header
             .mark(&start)
@@ -1016,7 +1058,7 @@ mod tests {
     fn test_location_list_32() {
         let start = Label::new();
         let first = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // A location before the offset.
             .mark(&start)
@@ -1146,7 +1188,7 @@ mod tests {
     fn test_location_list_64() {
         let start = Label::new();
         let first = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // A location before the offset.
             .mark(&start)
@@ -1274,7 +1316,7 @@ mod tests {
 
     #[test]
     fn test_locations_invalid() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // An invalid location range.
             .L32(0x20000).L32(0x10000).L16(4).L32(1)
@@ -1325,7 +1367,7 @@ mod tests {
             debug_addr,
             debug_addr_base,
         ) {
-            Err(Error::UnexpectedEof) => {}
+            Err(Error::UnexpectedEof(_)) => {}
             otherwise => panic!("Unexpected result: {:?}", otherwise),
         }
     }

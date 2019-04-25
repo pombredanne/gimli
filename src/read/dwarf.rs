@@ -1,21 +1,24 @@
-use common::{
+use fallible_iterator::FallibleIterator;
+
+use crate::common::{
     DebugAddrBase, DebugAddrIndex, DebugInfoOffset, DebugLineStrOffset, DebugLocListsBase,
     DebugLocListsIndex, DebugRngListsBase, DebugRngListsIndex, DebugStrOffset, DebugStrOffsetsBase,
     DebugStrOffsetsIndex, DebugTypesOffset, Encoding, LocationListsOffset, RangeListsOffset,
-    UnitSectionOffset,
+    SectionId, UnitSectionOffset,
 };
-use constants;
-use read::{
+use crate::constants;
+use crate::read::{
     Abbreviations, AttributeValue, CompilationUnitHeader, CompilationUnitHeadersIter, DebugAbbrev,
     DebugAddr, DebugInfo, DebugLine, DebugLineStr, DebugStr, DebugStrOffsets, DebugTypes,
-    EntriesCursor, EntriesTree, Error, IncompleteLineProgram, LocListIter, LocationLists,
-    RangeLists, Reader, ReaderOffset, Result, RngListIter, TypeUnitHeader, TypeUnitHeadersIter,
-    UnitHeader, UnitOffset,
+    DebuggingInformationEntry, EntriesCursor, EntriesTree, Error, IncompleteLineProgram,
+    LocListIter, LocationLists, Range, RangeLists, Reader, ReaderOffset, ReaderOffsetId, Result,
+    RngListIter, Section, TypeUnitHeader, TypeUnitHeadersIter, UnitHeader, UnitOffset,
 };
+use crate::string::String;
 
 /// All of the commonly used DWARF sections, and other common information.
 #[derive(Debug, Default)]
-pub struct Dwarf<R: Reader> {
+pub struct Dwarf<R> {
     /// The `.debug_abbrev` section.
     pub debug_abbrev: DebugAbbrev<R>,
 
@@ -50,8 +53,85 @@ pub struct Dwarf<R: Reader> {
     pub ranges: RangeLists<R>,
 }
 
+impl<T> Dwarf<T> {
+    /// Try to load the DWARF sections using the given loader functions.
+    ///
+    /// `section` loads a DWARF section from the main object file.
+    /// `sup` loads a DWARF sections from the supplementary object file.
+    /// These functions should return an empty section if the section does not exist.
+    pub fn load<F1, F2, E>(mut section: F1, mut sup: F2) -> std::result::Result<Self, E>
+    where
+        F1: FnMut(SectionId) -> std::result::Result<T, E>,
+        F2: FnMut(SectionId) -> std::result::Result<T, E>,
+    {
+        // Section types are inferred.
+        let debug_loc = Section::load(&mut section)?;
+        let debug_loclists = Section::load(&mut section)?;
+        let debug_ranges = Section::load(&mut section)?;
+        let debug_rnglists = Section::load(&mut section)?;
+        Ok(Dwarf {
+            debug_abbrev: Section::load(&mut section)?,
+            debug_addr: Section::load(&mut section)?,
+            debug_info: Section::load(&mut section)?,
+            debug_line: Section::load(&mut section)?,
+            debug_line_str: Section::load(&mut section)?,
+            debug_str: Section::load(&mut section)?,
+            debug_str_offsets: Section::load(&mut section)?,
+            debug_str_sup: Section::load(&mut sup)?,
+            debug_types: Section::load(&mut section)?,
+            locations: LocationLists::new(debug_loc, debug_loclists),
+            ranges: RangeLists::new(debug_ranges, debug_rnglists),
+        })
+    }
+
+    /// Create a `Dwarf` structure that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// It can be useful to load DWARF sections into owned data structures,
+    /// such as `Vec`. However, we do not implement the `Reader` trait
+    /// for `Vec`, because it would be very inefficient, but this trait
+    /// is required for all of the methods that parse the DWARF data.
+    /// So we first load the DWARF sections into `Vec`s, and then use
+    /// `borrow` to create `Reader`s that reference the data.
+    ///
+    /// ```rust,no_run
+    /// # fn example() -> Result<(), gimli::Error> {
+    /// # let loader = |name| -> Result<_, gimli::Error> { unimplemented!() };
+    /// # let sup_loader = |name| { unimplemented!() };
+    /// // Read the DWARF sections into `Vec`s with whatever object loader you're using.
+    /// let owned_dwarf: gimli::Dwarf<Vec<u8>> = gimli::Dwarf::load(loader, sup_loader)?;
+    /// // Create references to the DWARF sections.
+    /// let dwarf = owned_dwarf.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// # unreachable!()
+    /// # }
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> Dwarf<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        Dwarf {
+            debug_abbrev: self.debug_abbrev.borrow(&mut borrow),
+            debug_addr: self.debug_addr.borrow(&mut borrow),
+            debug_info: self.debug_info.borrow(&mut borrow),
+            debug_line: self.debug_line.borrow(&mut borrow),
+            debug_line_str: self.debug_line_str.borrow(&mut borrow),
+            debug_str: self.debug_str.borrow(&mut borrow),
+            debug_str_offsets: self.debug_str_offsets.borrow(&mut borrow),
+            debug_str_sup: self.debug_str_sup.borrow(&mut borrow),
+            debug_types: self.debug_types.borrow(&mut borrow),
+            locations: self.locations.borrow(&mut borrow),
+            ranges: self.ranges.borrow(&mut borrow),
+        }
+    }
+}
+
 impl<R: Reader> Dwarf<R> {
-    /// Iterate the compilation- and partial-units in this
+    /// Iterate the compilation- and partial-unit headers in the
     /// `.debug_info` section.
     ///
     /// Can be [used with
@@ -61,7 +141,13 @@ impl<R: Reader> Dwarf<R> {
         self.debug_info.units()
     }
 
-    /// Iterate the type-units in this `.debug_types` section.
+    /// Construct a new `Unit` from the given compilation unit header.
+    #[inline]
+    pub fn unit(&self, header: CompilationUnitHeader<R>) -> Result<Unit<R>> {
+        Unit::new(self, header)
+    }
+
+    /// Iterate the type-unit headers in the `.debug_types` section.
     ///
     /// Can be [used with
     /// `FallibleIterator`](./index.html#using-with-fallibleiterator).
@@ -70,20 +156,23 @@ impl<R: Reader> Dwarf<R> {
         self.debug_types.units()
     }
 
+    /// Construct a new `Unit` from the given type unit header.
+    #[inline]
+    pub fn type_unit(&self, header: TypeUnitHeader<R>) -> Result<Unit<R>> {
+        Unit::new_type_unit(self, header)
+    }
+
     /// Parse the abbreviations for a compilation unit.
     // TODO: provide caching of abbreviations
     #[inline]
-    pub fn abbreviations(
-        &self,
-        unit: &CompilationUnitHeader<R, R::Offset>,
-    ) -> Result<Abbreviations> {
+    pub fn abbreviations(&self, unit: &CompilationUnitHeader<R>) -> Result<Abbreviations> {
         unit.abbreviations(&self.debug_abbrev)
     }
 
     /// Parse the abbreviations for a type unit.
     // TODO: provide caching of abbreviations
     #[inline]
-    pub fn type_abbreviations(&self, unit: &TypeUnitHeader<R, R::Offset>) -> Result<Abbreviations> {
+    pub fn type_abbreviations(&self, unit: &TypeUnitHeader<R>) -> Result<Abbreviations> {
         unit.abbreviations(&self.debug_abbrev)
     }
 
@@ -124,7 +213,7 @@ impl<R: Reader> Dwarf<R> {
     ///
     /// then return the attribute's string value. Returns an error if the attribute
     /// value does not have a string form, or if a string form has an invalid value.
-    pub fn attr_string(&self, unit: &Unit<R>, attr: AttributeValue<R, R::Offset>) -> Result<R> {
+    pub fn attr_string(&self, unit: &Unit<R>, attr: AttributeValue<R>) -> Result<R> {
         match attr {
             AttributeValue::String(string) => Ok(string),
             AttributeValue::DebugStrRef(offset) => self.debug_str.get_str(offset),
@@ -185,7 +274,7 @@ impl<R: Reader> Dwarf<R> {
     pub fn attr_ranges_offset(
         &self,
         unit: &Unit<R>,
-        attr: AttributeValue<R, R::Offset>,
+        attr: AttributeValue<R>,
     ) -> Result<Option<RangeListsOffset<R::Offset>>> {
         match attr {
             AttributeValue::RangeListsRef(offset) => Ok(Some(offset)),
@@ -206,12 +295,63 @@ impl<R: Reader> Dwarf<R> {
     pub fn attr_ranges(
         &self,
         unit: &Unit<R>,
-        attr: AttributeValue<R, R::Offset>,
+        attr: AttributeValue<R>,
     ) -> Result<Option<RngListIter<R>>> {
         match self.attr_ranges_offset(unit, attr)? {
             Some(offset) => Ok(Some(self.ranges(unit, offset)?)),
             None => Ok(None),
         }
+    }
+
+    /// Return an iterator for the address ranges of a `DebuggingInformationEntry`.
+    ///
+    /// This uses `DW_AT_low_pc`, `DW_AT_high_pc` and `DW_AT_ranges`.
+    pub fn die_ranges(
+        &self,
+        unit: &Unit<R>,
+        entry: &DebuggingInformationEntry<R>,
+    ) -> Result<RangeIter<R>> {
+        let mut low_pc = None;
+        let mut high_pc = None;
+        let mut size = None;
+        let mut attrs = entry.attrs();
+        while let Some(attr) = attrs.next()? {
+            match attr.name() {
+                constants::DW_AT_low_pc => {
+                    if let AttributeValue::Addr(val) = attr.value() {
+                        low_pc = Some(val);
+                    }
+                }
+                constants::DW_AT_high_pc => match attr.value() {
+                    AttributeValue::Addr(val) => high_pc = Some(val),
+                    AttributeValue::Udata(val) => size = Some(val),
+                    _ => return Err(Error::UnsupportedAttributeForm),
+                },
+                constants::DW_AT_ranges => {
+                    if let Some(list) = self.attr_ranges(unit, attr.value())? {
+                        return Ok(RangeIter(RangeIterInner::List(list)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let range = low_pc.and_then(|begin| {
+            let end = size.map(|size| begin + size).or(high_pc);
+            // TODO: perhaps return an error if `end` is `None`
+            end.map(|end| Range { begin, end })
+        });
+        Ok(RangeIter(RangeIterInner::Single(range)))
+    }
+
+    /// Return an iterator for the address ranges of a `Unit`.
+    ///
+    /// This uses `DW_AT_low_pc`, `DW_AT_high_pc` and `DW_AT_ranges` of the
+    /// root `DebuggingInformationEntry`.
+    pub fn unit_ranges(&self, unit: &Unit<R>) -> Result<RangeIter<R>> {
+        let mut cursor = unit.header.entries(&unit.abbreviations);
+        cursor.next_dfs()?;
+        let root = cursor.current().ok_or(Error::MissingUnitDie)?;
+        self.die_ranges(unit, root)
     }
 
     /// Return the location list offset at the given index.
@@ -251,7 +391,7 @@ impl<R: Reader> Dwarf<R> {
     pub fn attr_locations_offset(
         &self,
         unit: &Unit<R>,
-        attr: AttributeValue<R, R::Offset>,
+        attr: AttributeValue<R>,
     ) -> Result<Option<LocationListsOffset<R::Offset>>> {
         match attr {
             AttributeValue::LocationListsRef(offset) => Ok(Some(offset)),
@@ -274,24 +414,73 @@ impl<R: Reader> Dwarf<R> {
     pub fn attr_locations(
         &self,
         unit: &Unit<R>,
-        attr: AttributeValue<R, R::Offset>,
+        attr: AttributeValue<R>,
     ) -> Result<Option<LocListIter<R>>> {
         match self.attr_locations_offset(unit, attr)? {
             Some(offset) => Ok(Some(self.locations(unit, offset)?)),
             None => Ok(None),
         }
     }
+
+    /// Call `Reader::lookup_offset_id` for each section, and return the first match.
+    ///
+    /// The first element of the tuple is `true` for supplementary sections.
+    pub fn lookup_offset_id(&self, id: ReaderOffsetId) -> Option<(bool, SectionId, R::Offset)> {
+        None.or_else(|| self.debug_abbrev.lookup_offset_id(id))
+            .or_else(|| self.debug_addr.lookup_offset_id(id))
+            .or_else(|| self.debug_info.lookup_offset_id(id))
+            .or_else(|| self.debug_line.lookup_offset_id(id))
+            .or_else(|| self.debug_line_str.lookup_offset_id(id))
+            .or_else(|| self.debug_str.lookup_offset_id(id))
+            .or_else(|| self.debug_str_offsets.lookup_offset_id(id))
+            .or_else(|| self.debug_types.lookup_offset_id(id))
+            .or_else(|| self.locations.lookup_offset_id(id))
+            .or_else(|| self.ranges.lookup_offset_id(id))
+            .map(|(id, offset)| (false, id, offset))
+            .or_else(|| {
+                self.debug_str_sup
+                    .lookup_offset_id(id)
+                    .map(|(id, offset)| (true, id, offset))
+            })
+    }
+
+    /// Returns a string representation of the given error.
+    ///
+    /// This uses information from the DWARF sections to provide more information in some cases.
+    pub fn format_error(&self, err: Error) -> String {
+        #[allow(clippy::single_match)]
+        match err {
+            Error::UnexpectedEof(id) => match self.lookup_offset_id(id) {
+                Some((sup, section, offset)) => {
+                    return format!(
+                        "{} at {}{}+0x{:x}",
+                        err.description(),
+                        section.name(),
+                        if sup { "(sup)" } else { "" },
+                        offset.into_u64(),
+                    );
+                }
+                None => {}
+            },
+            _ => {}
+        }
+        err.description().into()
+    }
 }
 
 /// All of the commonly used information for a unit in the `.debug_info` or `.debug_types`
 /// sections.
 #[derive(Debug)]
-pub struct Unit<R: Reader> {
+pub struct Unit<R, Offset = <R as Reader>::Offset>
+where
+    R: Reader<Offset = Offset>,
+    Offset: ReaderOffset,
+{
     /// The section offset of the unit.
-    pub offset: UnitSectionOffset<R::Offset>,
+    pub offset: UnitSectionOffset<Offset>,
 
     /// The header of the unit.
-    pub header: UnitHeader<R, R::Offset>,
+    pub header: UnitHeader<R, Offset>,
 
     /// The parsed abbreviations for the unit.
     pub abbreviations: Abbreviations,
@@ -306,25 +495,25 @@ pub struct Unit<R: Reader> {
     pub low_pc: u64,
 
     /// The `DW_AT_str_offsets_base` attribute of the unit. Defaults to 0.
-    pub str_offsets_base: DebugStrOffsetsBase<R::Offset>,
+    pub str_offsets_base: DebugStrOffsetsBase<Offset>,
 
     /// The `DW_AT_addr_base` attribute of the unit. Defaults to 0.
-    pub addr_base: DebugAddrBase<R::Offset>,
+    pub addr_base: DebugAddrBase<Offset>,
 
     /// The `DW_AT_loclists_base` attribute of the unit. Defaults to 0.
-    pub loclists_base: DebugLocListsBase<R::Offset>,
+    pub loclists_base: DebugLocListsBase<Offset>,
 
     /// The `DW_AT_rnglists_base` attribute of the unit. Defaults to 0.
-    pub rnglists_base: DebugRngListsBase<R::Offset>,
+    pub rnglists_base: DebugRngListsBase<Offset>,
 
     /// The line number program of the unit.
-    pub line_program: Option<IncompleteLineProgram<R, R::Offset>>,
+    pub line_program: Option<IncompleteLineProgram<R, Offset>>,
 }
 
 impl<R: Reader> Unit<R> {
     /// Construct a new `Unit` from the given compilation unit header.
     #[inline]
-    pub fn new(dwarf: &Dwarf<R>, header: CompilationUnitHeader<R, R::Offset>) -> Result<Self> {
+    pub fn new(dwarf: &Dwarf<R>, header: CompilationUnitHeader<R>) -> Result<Self> {
         Self::new_internal(
             dwarf,
             UnitSectionOffset::DebugInfoOffset(header.offset()),
@@ -334,7 +523,7 @@ impl<R: Reader> Unit<R> {
 
     /// Construct a new `Unit` from the given type unit header.
     #[inline]
-    pub fn new_type_unit(dwarf: &Dwarf<R>, header: TypeUnitHeader<R, R::Offset>) -> Result<Self> {
+    pub fn new_type_unit(dwarf: &Dwarf<R>, header: TypeUnitHeader<R>) -> Result<Self> {
         Self::new_internal(
             dwarf,
             UnitSectionOffset::DebugTypesOffset(header.offset()),
@@ -345,7 +534,7 @@ impl<R: Reader> Unit<R> {
     fn new_internal(
         dwarf: &Dwarf<R>,
         offset: UnitSectionOffset<R::Offset>,
-        header: UnitHeader<R, R::Offset>,
+        header: UnitHeader<R>,
     ) -> Result<Self> {
         let abbreviations = header.abbreviations(&dwarf.debug_abbrev)?;
         let mut unit = Unit {
@@ -509,19 +698,92 @@ impl<T: ReaderOffset> UnitOffset<T> {
     }
 }
 
+/// An iterator for the address ranges of a `DebuggingInformationEntry`.
+///
+/// Returned by `Dwarf::die_ranges` and `Dwarf::unit_ranges`.
+#[derive(Debug)]
+pub struct RangeIter<R: Reader>(RangeIterInner<R>);
+
+#[derive(Debug)]
+enum RangeIterInner<R: Reader> {
+    Single(Option<Range>),
+    List(RngListIter<R>),
+}
+
+impl<R: Reader> Default for RangeIter<R> {
+    fn default() -> Self {
+        RangeIter(RangeIterInner::Single(None))
+    }
+}
+
+impl<R: Reader> RangeIter<R> {
+    /// Advance the iterator to the next range.
+    pub fn next(&mut self) -> Result<Option<Range>> {
+        match self.0 {
+            RangeIterInner::Single(ref mut range) => Ok(range.take()),
+            RangeIterInner::List(ref mut list) => list.next(),
+        }
+    }
+}
+
+impl<R: Reader> FallibleIterator for RangeIter<R> {
+    type Item = Range;
+    type Error = Error;
+
+    #[inline]
+    fn next(&mut self) -> ::std::result::Result<Option<Self::Item>, Self::Error> {
+        RangeIter::next(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use read::EndianSlice;
-    use Endianity;
+    use crate::read::EndianSlice;
+    use crate::{Endianity, LittleEndian};
 
     /// Ensure that `Dwarf<R>` is covariant wrt R.
     #[test]
     fn test_dwarf_variance() {
         /// This only needs to compile.
-        #[allow(dead_code)]
-        fn f<'a: 'b, 'b, E: Endianity>(x: Dwarf<EndianSlice<'a, E>>) -> Dwarf<EndianSlice<'b, E>> {
+        fn _f<'a: 'b, 'b, E: Endianity>(x: Dwarf<EndianSlice<'a, E>>) -> Dwarf<EndianSlice<'b, E>> {
             x
         }
+    }
+
+    /// Ensure that `Unit<R>` is covariant wrt R.
+    #[test]
+    fn test_dwarf_unit_variance() {
+        /// This only needs to compile.
+        fn _f<'a: 'b, 'b, E: Endianity>(x: Unit<EndianSlice<'a, E>>) -> Unit<EndianSlice<'b, E>> {
+            x
+        }
+    }
+
+    #[test]
+    fn test_format_error() {
+        let owned_dwarf =
+            Dwarf::load(|_| -> Result<_> { Ok(vec![1, 2]) }, |_| Ok(vec![1, 2])).unwrap();
+        let dwarf = owned_dwarf.borrow(|section| EndianSlice::new(&section, LittleEndian));
+
+        match dwarf.debug_str.get_str(DebugStrOffset(1)) {
+            Ok(r) => panic!("Unexpected str {:?}", r),
+            Err(e) => {
+                assert_eq!(
+                    dwarf.format_error(e),
+                    "Hit the end of input before it was expected at .debug_str+0x1"
+                );
+            }
+        }
+        match dwarf.debug_str_sup.get_str(DebugStrOffset(1)) {
+            Ok(r) => panic!("Unexpected str {:?}", r),
+            Err(e) => {
+                assert_eq!(
+                    dwarf.format_error(e),
+                    "Hit the end of input before it was expected at .debug_str(sup)+0x1"
+                );
+            }
+        }
+        assert_eq!(dwarf.format_error(Error::Io), Error::Io.description());
     }
 }

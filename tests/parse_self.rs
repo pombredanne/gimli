@@ -1,5 +1,3 @@
-extern crate gimli;
-
 use gimli::{
     AttributeValue, DebugAbbrev, DebugAddr, DebugAddrBase, DebugAranges, DebugInfo, DebugLine,
     DebugLoc, DebugLocLists, DebugPubNames, DebugPubTypes, DebugRanges, DebugRngLists, DebugStr,
@@ -386,17 +384,17 @@ fn test_parse_self_eh_frame() {
     while let Some(entry) = entries.next().expect("Should parse CFI entry OK") {
         match entry {
             CieOrFde::Cie(cie) => {
-                let mut instrs = cie.instructions();
+                let mut instrs = cie.instructions(&eh_frame, &bases);
                 while let Some(_) = instrs.next().expect("Can parse next CFI instruction OK") {
                     // TODO FITZGEN
                 }
             }
             CieOrFde::Fde(partial) => {
                 let fde = partial
-                    .parse(|offset| eh_frame.cie_from_offset(&bases, offset))
+                    .parse(UnwindSection::cie_from_offset)
                     .expect("Should be able to get CIE for FDE");
 
-                let mut instrs = fde.instructions();
+                let mut instrs = fde.instructions(&eh_frame, &bases);
                 while let Some(_) = instrs.next().expect("Can parse next CFI instruction OK") {
                     // TODO FITZGEN
                 }

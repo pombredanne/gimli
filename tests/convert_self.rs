@@ -1,5 +1,3 @@
-extern crate gimli;
-
 use std::env;
 use std::fs::File;
 use std::io::Read;
@@ -57,7 +55,7 @@ fn test_convert_debug_info() {
         ..Default::default()
     };
 
-    let mut dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Absolute(address)))
+    let mut dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Constant(address)))
         .expect("Should convert DWARF information");
 
     assert_eq!(dwarf.units.count(), 23);
@@ -79,7 +77,7 @@ fn test_convert_debug_info() {
     let debug_ranges_data = write_sections.debug_ranges.slice();
     let debug_str_data = write_sections.debug_str.slice();
     assert_eq!(debug_info_data.len(), 394_930);
-    assert_eq!(debug_abbrev_data.len(), 1282);
+    assert_eq!(debug_abbrev_data.len(), 9701);
     assert_eq!(debug_line_data.len(), 105_797);
     assert_eq!(debug_ranges_data.len(), 155_712);
     assert_eq!(debug_str_data.len(), 144_731);
@@ -103,7 +101,7 @@ fn test_convert_debug_info() {
         ..Default::default()
     };
 
-    let dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Absolute(address)))
+    let dwarf = write::Dwarf::from(&dwarf, &|address| Some(Address::Constant(address)))
         .expect("Should convert DWARF information");
 
     assert_eq!(dwarf.units.count(), 23);
@@ -112,4 +110,33 @@ fn test_convert_debug_info() {
         .sum();
     assert_eq!(entries, 29_560);
     assert_eq!(dwarf.strings.count(), 3921);
+}
+
+#[test]
+fn test_convert_eh_frame() {
+    // Convert existing section
+    let eh_frame = read_section("eh_frame");
+    let mut eh_frame = read::EhFrame::new(&eh_frame, LittleEndian);
+    // The `.eh_frame` fixture data was created on a 64-bit machine.
+    eh_frame.set_address_size(8);
+    let frames = write::FrameTable::from(&eh_frame, &|address| Some(Address::Constant(address)))
+        .expect("Should convert eh_frame information");
+    assert_eq!(frames.cie_count(), 2);
+    assert_eq!(frames.fde_count(), 3482);
+
+    // Write to new section
+    let mut write_eh_frame = write::EhFrame(EndianVec::new(LittleEndian));
+    frames
+        .write_eh_frame(&mut write_eh_frame)
+        .expect("Should write eh_frame information");
+    let eh_frame = write_eh_frame.slice();
+    assert_eq!(eh_frame.len(), 147152);
+
+    // Convert new section
+    let mut eh_frame = read::EhFrame::new(&eh_frame, LittleEndian);
+    eh_frame.set_address_size(8);
+    let frames = write::FrameTable::from(&eh_frame, &|address| Some(Address::Constant(address)))
+        .expect("Should convert eh_frame information");
+    assert_eq!(frames.cie_count(), 2);
+    assert_eq!(frames.fde_count(), 3482);
 }

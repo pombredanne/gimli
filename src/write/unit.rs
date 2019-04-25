@@ -1,16 +1,16 @@
+use crate::vec::Vec;
 use std::ops::{Deref, DerefMut};
 use std::{slice, usize};
-use vec::Vec;
 
-use common::{
+use crate::common::{
     DebugAbbrevOffset, DebugInfoOffset, DebugLineOffset, DebugMacinfoOffset, DebugStrOffset,
-    DebugTypeSignature, Encoding, Format, LocationListsOffset, UnitSectionOffset,
+    DebugTypeSignature, Encoding, Format, LocationListsOffset, SectionId, UnitSectionOffset,
 };
-use constants;
-use write::{
+use crate::constants;
+use crate::write::{
     Abbreviation, AbbreviationTable, Address, AttributeSpecification, BaseId, DebugLineStrOffsets,
     DebugStrOffsets, Error, FileId, LineProgram, LineStringId, RangeList, RangeListId,
-    RangeListOffsets, RangeListTable, Result, Section, SectionId, Sections, StringId, Writer,
+    RangeListOffsets, RangeListTable, Result, Section, Sections, StringId, Writer,
 };
 
 define_id!(UnitId, "An identifier for a unit in a `UnitTable`.");
@@ -19,7 +19,7 @@ define_id!(UnitEntryId, "An identifier for an entry in a `Unit`.");
 
 /// The bytecode for a DWARF expression or location description.
 // TODO: this needs to be a `Vec<Op>` so we can handle relocations
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Expression(pub Vec<u8>);
 
 /// A table of units that will be stored in the `.debug_info` section.
@@ -91,16 +91,16 @@ impl UnitTable {
         line_strings: &DebugLineStrOffsets,
         strings: &DebugStrOffsets,
     ) -> Result<DebugInfoOffsets> {
-        // Use one abbreviation table for everything.
-        let abbrev_offset = sections.debug_abbrev.offset();
-        let mut abbrevs = AbbreviationTable::default();
-
         let mut debug_info_refs = Vec::new();
         let mut offsets = DebugInfoOffsets {
             base_id: self.base_id,
             units: Vec::new(),
         };
         for unit in &mut self.units {
+            // TODO: maybe share abbreviation tables
+            let abbrev_offset = sections.debug_abbrev.offset();
+            let mut abbrevs = AbbreviationTable::default();
+
             offsets.units.push(unit.write(
                 sections,
                 abbrev_offset,
@@ -109,6 +109,8 @@ impl UnitTable {
                 strings,
                 &mut debug_info_refs,
             )?);
+
+            abbrevs.write(&mut sections.debug_abbrev)?;
         }
 
         for (offset, (unit, entry), size) in debug_info_refs {
@@ -121,8 +123,6 @@ impl UnitTable {
                 size,
             )?;
         }
-
-        abbrevs.write(&mut sections.debug_abbrev)?;
 
         Ok(offsets)
     }
@@ -257,7 +257,7 @@ impl Unit {
 
         for entry in &self.entries {
             for attr in &entry.attrs {
-                if let AttributeValue::FileIndex(_) = attr.value {
+                if let AttributeValue::FileIndex(Some(_)) = attr.value {
                     return true;
                 }
             }
@@ -345,7 +345,7 @@ impl Unit {
             let entry_offset = offsets.entry(entry).0;
             debug_assert_ne!(entry_offset, 0);
             // This does not need relocation.
-            w.write_word_at(
+            w.write_udata_at(
                 offset.0,
                 (entry_offset - offsets.unit.0) as u64,
                 self.format().word_size(),
@@ -538,7 +538,7 @@ impl DebuggingInformationEntry {
 
         let sibling_offset = if self.sibling && !self.children.is_empty() {
             let offset = w.offset();
-            w.write_word(0, unit.format().word_size())?;
+            w.write_udata(0, unit.format().word_size())?;
             Some(offset)
         } else {
             None
@@ -579,7 +579,7 @@ impl DebuggingInformationEntry {
         if let Some(offset) = sibling_offset {
             let next_offset = (w.offset().0 - offsets.unit.0) as u64;
             // This does not need relocation.
-            w.write_word_at(offset.0, next_offset, unit.format().word_size())?;
+            w.write_udata_at(offset.0, next_offset, unit.format().word_size())?;
         }
         Ok(())
     }
@@ -622,6 +622,7 @@ impl Attribute {
 
     /// Write the attribute to the given sections.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn write<W: Writer>(
         &self,
         w: &mut DebugInfo<W>,
@@ -808,7 +809,7 @@ pub enum AttributeValue {
 
     /// An index into the filename entries from the line number information
     /// table for the unit containing this value.
-    FileIndex(FileId),
+    FileIndex(Option<FileId>),
 }
 
 impl AttributeValue {
@@ -891,7 +892,7 @@ impl AttributeValue {
     }
 
     /// Write the attribute value to the given sections.
-    #[allow(clippy::cyclomatic_complexity)]
+    #[allow(clippy::cyclomatic_complexity, clippy::too_many_arguments)]
     fn write<W: Writer>(
         &self,
         w: &mut DebugInfo<W>,
@@ -960,7 +961,7 @@ impl AttributeValue {
                     Format::Dwarf64 => debug_assert_form!(constants::DW_FORM_ref8),
                 }
                 unit_refs.push((w.offset(), id));
-                w.write_word(0, unit.format().word_size())?;
+                w.write_udata(0, unit.format().word_size())?;
             }
             AttributeValue::AnyUnitEntryRef(id) => {
                 debug_assert_form!(constants::DW_FORM_ref_addr);
@@ -970,14 +971,14 @@ impl AttributeValue {
                     unit.format().word_size()
                 };
                 debug_info_refs.push((w.offset(), id, size));
-                w.write_word(0, size)?;
+                w.write_udata(0, size)?;
             }
             AttributeValue::DebugInfoRefSup(val) => {
                 match unit.format() {
                     Format::Dwarf32 => debug_assert_form!(constants::DW_FORM_ref_sup4),
                     Format::Dwarf64 => debug_assert_form!(constants::DW_FORM_ref_sup8),
                 }
-                w.write_word(val.0 as u64, unit.format().word_size())?;
+                w.write_udata(val.0 as u64, unit.format().word_size())?;
             }
             AttributeValue::LineProgramRef => {
                 if unit.version() >= 4 {
@@ -1036,7 +1037,7 @@ impl AttributeValue {
             }
             AttributeValue::DebugStrRefSup(val) => {
                 debug_assert_form!(constants::DW_FORM_strp_sup);
-                w.write_word(val.0 as u64, unit.format().word_size())?;
+                w.write_udata(val.0 as u64, unit.format().word_size())?;
             }
             AttributeValue::LineStringRef(val) => {
                 debug_assert_form!(constants::DW_FORM_line_strp);
@@ -1101,7 +1102,7 @@ impl AttributeValue {
             }
             AttributeValue::FileIndex(val) => {
                 debug_assert_form!(constants::DW_FORM_udata);
-                w.write_uleb128(val.raw())?;
+                w.write_uleb128(val.map(FileId::raw).unwrap_or(0))?;
             }
             AttributeValue::UnitSectionRef(_) => {
                 return Err(Error::InvalidAttributeValue);
@@ -1159,17 +1160,17 @@ impl UnitOffsets {
 #[cfg(feature = "read")]
 pub(crate) mod convert {
     use super::*;
-    use collections::HashMap;
-    use read::{self, Reader};
-    use write::{self, ConvertError, ConvertResult};
+    use crate::collections::HashMap;
+    use crate::read::{self, Reader};
+    use crate::write::{self, ConvertError, ConvertResult};
 
-    pub(crate) struct ConvertUnitContext<'a, R: Reader<Offset = usize> + 'a> {
+    pub(crate) struct ConvertUnitContext<'a, R: Reader<Offset = usize>> {
         pub dwarf: &'a read::Dwarf<R>,
         pub unit: &'a read::Unit<R>,
         pub line_strings: &'a mut write::LineStringTable,
         pub strings: &'a mut write::StringTable,
         pub ranges: &'a mut write::RangeListTable,
-        pub convert_address: &'a Fn(u64) -> Option<Address>,
+        pub convert_address: &'a dyn Fn(u64) -> Option<Address>,
         pub base_address: Address,
         pub line_program_offset: Option<DebugLineOffset>,
         pub line_program_files: Vec<FileId>,
@@ -1183,14 +1184,14 @@ pub(crate) mod convert {
         ///
         /// `convert_address` is a function to convert read addresses into the `Address`
         /// type. For non-relocatable addresses, this function may simply return
-        /// `Address::Absolute(address)`. For relocatable addresses, it is the caller's
+        /// `Address::Constant(address)`. For relocatable addresses, it is the caller's
         /// responsibility to determine the symbol and addend corresponding to the address
-        /// and return `Address::Relative { symbol, addend }`.
+        /// and return `Address::Symbol { symbol, addend }`.
         pub fn from<R: Reader<Offset = usize>>(
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &Fn(u64) -> Option<Address>,
+            convert_address: &dyn Fn(u64) -> Option<Address>,
         ) -> ConvertResult<UnitTable> {
             let base_id = BaseId::default();
             let mut units = Vec::new();
@@ -1243,17 +1244,17 @@ pub(crate) mod convert {
         /// Create a unit by reading the data in the given sections.
         #[allow(clippy::too_many_arguments)]
         pub(crate) fn from<R: Reader<Offset = usize>>(
-            from_unit: read::CompilationUnitHeader<R>,
+            from_header: read::CompilationUnitHeader<R>,
             unit_id: UnitId,
             unit_entry_offsets: &mut HashMap<UnitSectionOffset, (UnitId, UnitEntryId)>,
             dwarf: &read::Dwarf<R>,
             line_strings: &mut write::LineStringTable,
             strings: &mut write::StringTable,
-            convert_address: &Fn(u64) -> Option<Address>,
+            convert_address: &dyn Fn(u64) -> Option<Address>,
         ) -> ConvertResult<Unit> {
             let base_id = BaseId::default();
 
-            let from_unit = read::Unit::new(dwarf, from_unit)?;
+            let from_unit = dwarf.unit(from_header)?;
             let encoding = from_unit.encoding();
             let base_address =
                 convert_address(from_unit.low_pc).ok_or(ConvertError::InvalidAddress)?;
@@ -1503,9 +1504,14 @@ pub(crate) mod convert {
                 read::AttributeValue::Inline(val) => AttributeValue::Inline(val),
                 read::AttributeValue::Ordering(val) => AttributeValue::Ordering(val),
                 read::AttributeValue::FileIndex(val) => {
-                    match context.line_program_files.get(val as usize) {
-                        Some(id) => AttributeValue::FileIndex(*id),
-                        None => return Err(ConvertError::InvalidFileIndex),
+                    if val == 0 {
+                        // 0 means not specified, even for version 5.
+                        AttributeValue::FileIndex(None)
+                    } else {
+                        match context.line_program_files.get(val as usize) {
+                            Some(id) => AttributeValue::FileIndex(Some(*id)),
+                            None => return Err(ConvertError::InvalidFileIndex),
+                        }
                     }
                 }
                 // Should always be a more specific section reference.
@@ -1521,17 +1527,17 @@ pub(crate) mod convert {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{
+    use crate::common::{
         DebugAddrBase, DebugLocListsBase, DebugRngListsBase, DebugStrOffsetsBase, LineEncoding,
     };
-    use constants;
-    use read;
-    use std::mem;
-    use write::{
+    use crate::constants;
+    use crate::read;
+    use crate::write::{
         DebugLine, DebugLineStr, DebugStr, EndianVec, LineString, LineStringTable, Range,
         RangeListOffsets, RangeListTable, StringTable,
     };
-    use LittleEndian;
+    use crate::LittleEndian;
+    use std::mem;
 
     #[test]
     #[allow(clippy::cyclomatic_complexity)]
@@ -1680,7 +1686,7 @@ mod tests {
             assert_eq!(unit1.address_size(), read_unit1.address_size());
             assert_eq!(unit1.format(), read_unit1.format());
 
-            let read_unit1 = read::Unit::new(&dwarf, read_unit1).unwrap();
+            let read_unit1 = dwarf.unit(read_unit1).unwrap();
             let mut read_entries = read_unit1.entries();
 
             let root = unit1.get(unit1.root());
@@ -1813,7 +1819,7 @@ mod tests {
             &dwarf,
             &mut convert_line_strings,
             &mut convert_strings,
-            &|address| Some(Address::Absolute(address)),
+            &|address| Some(Address::Constant(address)),
         )
         .unwrap();
         assert_eq!(convert_units.count(), units.count());
@@ -1845,8 +1851,8 @@ mod tests {
         let string_id = strings.add("string two");
         let mut ranges = RangeListTable::default();
         let range_id = ranges.add(RangeList(vec![Range::StartEnd {
-            begin: Address::Absolute(0x1234),
-            end: Address::Absolute(0x2345),
+            begin: Address::Constant(0x1234),
+            end: Address::Constant(0x2345),
         }]));
 
         let mut debug_str = DebugStr::from(EndianVec::new(LittleEndian));
@@ -1898,7 +1904,7 @@ mod tests {
                     for &(ref name, ref value, ref expect_value) in &[
                         (
                             constants::DW_AT_name,
-                            AttributeValue::Address(Address::Absolute(0x1234)),
+                            AttributeValue::Address(Address::Constant(0x1234)),
                             read::AttributeValue::Addr(0x1234),
                         ),
                         (
@@ -2126,8 +2132,8 @@ mod tests {
                             line_strings: &mut line_strings,
                             strings: &mut strings,
                             ranges: &mut ranges,
-                            convert_address: &|address| Some(Address::Absolute(address)),
-                            base_address: Address::Absolute(0),
+                            convert_address: &|address| Some(Address::Constant(address)),
+                            base_address: Address::Constant(0),
                             line_program_offset: None,
                             line_program_files: Vec::new(),
                         };
@@ -2294,7 +2300,7 @@ mod tests {
             &dwarf,
             &mut convert_line_strings,
             &mut convert_strings,
-            &|address| Some(Address::Absolute(address)),
+            &|address| Some(Address::Constant(address)),
         )
         .unwrap();
         assert_eq!(convert_units.count(), units.count());
@@ -2500,7 +2506,7 @@ mod tests {
                         &dwarf,
                         &mut convert_line_strings,
                         &mut convert_strings,
-                        &|address| Some(Address::Absolute(address)),
+                        &|address| Some(Address::Constant(address)),
                     )
                     .unwrap();
 
@@ -2523,12 +2529,12 @@ mod tests {
                         ),
                         (
                             constants::DW_AT_decl_file,
-                            AttributeValue::FileIndex(file1),
+                            AttributeValue::FileIndex(Some(file1)),
                             read::AttributeValue::Udata(file1.raw()),
                         ),
                         (
                             constants::DW_AT_decl_file,
-                            AttributeValue::FileIndex(file2),
+                            AttributeValue::FileIndex(Some(file2)),
                             read::AttributeValue::Udata(file2.raw()),
                         ),
                     ][..]
@@ -2596,8 +2602,8 @@ mod tests {
                             line_strings: &mut line_strings,
                             strings: &mut strings,
                             ranges: &mut ranges,
-                            convert_address: &|address| Some(Address::Absolute(address)),
-                            base_address: Address::Absolute(0),
+                            convert_address: &|address| Some(Address::Constant(address)),
+                            base_address: Address::Constant(0),
                             line_program_offset: Some(line_program_offset),
                             line_program_files: line_program_files.clone(),
                         };
@@ -2629,14 +2635,12 @@ mod tests {
             );
 
             let mut unit = Unit::new(encoding, line_program);
-            if used {
-                let file_id = FileId::new(0, encoding.version);
-                let root = unit.root();
-                unit.get_mut(root).set(
-                    constants::DW_AT_decl_file,
-                    AttributeValue::FileIndex(file_id),
-                );
-            }
+            let file_id = if used { Some(FileId::new(0)) } else { None };
+            let root = unit.root();
+            unit.get_mut(root).set(
+                constants::DW_AT_decl_file,
+                AttributeValue::FileIndex(file_id),
+            );
 
             let mut units = UnitTable::default();
             units.add(unit);

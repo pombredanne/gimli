@@ -1,16 +1,18 @@
 use fallible_iterator::FallibleIterator;
 
-use common::{
+use crate::common::{
     DebugAddrBase, DebugAddrIndex, DebugRngListsBase, DebugRngListsIndex, Encoding, Format,
-    RangeListsOffset,
+    RangeListsOffset, SectionId,
 };
-use constants;
-use endianity::Endianity;
-use read::{DebugAddr, EndianSlice, Error, Reader, ReaderOffset, Result, Section};
+use crate::constants;
+use crate::endianity::Endianity;
+use crate::read::{
+    DebugAddr, EndianSlice, Error, Reader, ReaderOffset, ReaderOffsetId, Result, Section,
+};
 
 /// The raw contents of the `.debug_ranges` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugRanges<R: Reader> {
+pub struct DebugRanges<R> {
     pub(crate) section: R,
 }
 
@@ -37,13 +39,17 @@ where
     }
 }
 
-impl<R: Reader> Section<R> for DebugRanges<R> {
-    fn section_name() -> &'static str {
-        ".debug_ranges"
+impl<R> Section<R> for DebugRanges<R> {
+    fn id() -> SectionId {
+        SectionId::DebugRanges
+    }
+
+    fn reader(&self) -> &R {
+        &self.section
     }
 }
 
-impl<R: Reader> From<R> for DebugRanges<R> {
+impl<R> From<R> for DebugRanges<R> {
     fn from(section: R) -> Self {
         DebugRanges { section }
     }
@@ -52,7 +58,7 @@ impl<R: Reader> From<R> for DebugRanges<R> {
 /// The `DebugRngLists` struct represents the contents of the
 /// `.debug_rnglists` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugRngLists<R: Reader> {
+pub struct DebugRngLists<R> {
     section: R,
 }
 
@@ -80,13 +86,17 @@ where
     }
 }
 
-impl<R: Reader> Section<R> for DebugRngLists<R> {
-    fn section_name() -> &'static str {
-        ".debug_rnglists"
+impl<R> Section<R> for DebugRngLists<R> {
+    fn id() -> SectionId {
+        SectionId::DebugRngLists
+    }
+
+    fn reader(&self) -> &R {
+        &self.section
     }
 }
 
-impl<R: Reader> From<R> for DebugRngLists<R> {
+impl<R> From<R> for DebugRngLists<R> {
     fn from(section: R) -> Self {
         DebugRngLists { section }
     }
@@ -152,12 +162,12 @@ fn parse_header<R: Reader>(input: &mut R) -> Result<RngListsHeader> {
 
 /// The DWARF data found in `.debug_ranges` and `.debug_rnglists` sections.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct RangeLists<R: Reader> {
+pub struct RangeLists<R> {
     debug_ranges: DebugRanges<R>,
     debug_rnglists: DebugRngLists<R>,
 }
 
-impl<R: Reader> RangeLists<R> {
+impl<R> RangeLists<R> {
     /// Construct a new `RangeLists` instance from the data in the `.debug_ranges` and
     /// `.debug_rnglists` sections.
     pub fn new(debug_ranges: DebugRanges<R>, debug_rnglists: DebugRngLists<R>) -> RangeLists<R> {
@@ -166,7 +176,36 @@ impl<R: Reader> RangeLists<R> {
             debug_rnglists,
         }
     }
+}
 
+impl<T> RangeLists<T> {
+    /// Create a `RangeLists` that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```rust,no_run
+    /// # let load_section = || unimplemented!();
+    /// // Read the DWARF section into a `Vec` with whatever object loader you're using.
+    /// let owned_section: gimli::RangeLists<Vec<u8>> = load_section();
+    /// // Create a reference to the DWARF section.
+    /// let section = owned_section.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> RangeLists<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        RangeLists {
+            debug_ranges: borrow(&self.debug_ranges.section).into(),
+            debug_rnglists: borrow(&self.debug_rnglists.section).into(),
+        }
+    }
+}
+
+impl<R: Reader> RangeLists<R> {
     /// Iterate over the `Range` list entries starting at the given offset.
     ///
     /// The `unit_version` and `address_size` must match the compilation unit that the
@@ -241,6 +280,13 @@ impl<R: Reader> RangeLists<R> {
         input
             .read_offset(format)
             .map(|x| RangeListsOffset(base.0 + x))
+    }
+
+    /// Call `Reader::lookup_offset_id` for each section, and return the first match.
+    pub fn lookup_offset_id(&self, id: ReaderOffsetId) -> Option<(SectionId, R::Offset)> {
+        self.debug_ranges
+            .lookup_offset_id(id)
+            .or_else(|| self.debug_rnglists.lookup_offset_id(id))
     }
 }
 
@@ -553,12 +599,10 @@ impl Range {
 
 #[cfg(test)]
 mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::{Endian, Label, LabelMaker, Section};
     use super::*;
-    use endianity::LittleEndian;
-    use test_util::GimliSectionMethods;
+    use crate::endianity::LittleEndian;
+    use crate::test_util::GimliSectionMethods;
+    use test_assembler::{Endian, Label, LabelMaker, Section};
 
     #[test]
     fn test_rnglists_32() {
@@ -579,7 +623,7 @@ mod tests {
         let start = Label::new();
         let first = Label::new();
         let size = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // Header
             .mark(&start)
@@ -771,7 +815,7 @@ mod tests {
         let start = Label::new();
         let first = Label::new();
         let size = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // Header
             .mark(&start)
@@ -981,7 +1025,7 @@ mod tests {
     fn test_ranges_32() {
         let start = Label::new();
         let first = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // A range before the offset.
             .mark(&start)
@@ -1093,7 +1137,7 @@ mod tests {
     fn test_ranges_64() {
         let start = Label::new();
         let first = Label::new();
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // A range before the offset.
             .mark(&start)
@@ -1203,7 +1247,7 @@ mod tests {
 
     #[test]
     fn test_ranges_invalid() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let section = Section::with_endian(Endian::Little)
             // An invalid range.
             .L32(0x20000).L32(0x10000)
@@ -1254,7 +1298,7 @@ mod tests {
             debug_addr,
             debug_addr_base,
         ) {
-            Err(Error::UnexpectedEof) => {}
+            Err(Error::UnexpectedEof(_)) => {}
             otherwise => panic!("Unexpected result: {:?}", otherwise),
         }
     }

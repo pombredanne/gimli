@@ -1,13 +1,6 @@
 // Allow clippy lints when building without clippy.
 #![allow(unknown_lints)]
 
-extern crate fallible_iterator;
-extern crate gimli;
-extern crate memmap;
-extern crate object;
-extern crate rayon;
-extern crate typed_arena;
-
 use gimli::{AttributeValue, CompilationUnitHeader};
 use object::Object;
 use rayon::prelude::*;
@@ -168,7 +161,7 @@ fn validate_info<W, R>(
         last_offset = u.offset().0 + u.length_including_self();
         units.push(u);
     }
-    let process_unit = |unit: CompilationUnitHeader<R, R::Offset>| -> UnitSummary {
+    let process_unit = |unit: CompilationUnitHeader<R>| -> UnitSummary {
         let mut ret = UnitSummary {
             internally_valid: false,
             offset: unit.offset(),

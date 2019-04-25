@@ -2,10 +2,12 @@ use fallible_iterator::FallibleIterator;
 use std::cmp::Ordering;
 use std::marker::PhantomData;
 
-use common::{DebugInfoOffset, Encoding};
-use endianity::Endianity;
-use read::lookup::{DebugLookup, LookupEntryIter, LookupParser};
-use read::{parse_debug_info_offset, EndianSlice, Error, Reader, ReaderOffset, Result, Section};
+use crate::common::{DebugInfoOffset, Encoding, SectionId};
+use crate::endianity::Endianity;
+use crate::read::lookup::{DebugLookup, LookupEntryIter, LookupParser};
+use crate::read::{
+    parse_debug_info_offset, EndianSlice, Error, Reader, ReaderOffset, Result, Section,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ArangeHeader<T = usize> {
@@ -219,8 +221,12 @@ impl<R: Reader> DebugAranges<R> {
 }
 
 impl<R: Reader> Section<R> for DebugAranges<R> {
-    fn section_name() -> &'static str {
-        ".debug_aranges"
+    fn id() -> SectionId {
+        SectionId::DebugAranges
+    }
+
+    fn reader(&self) -> &R {
+        self.0.reader()
     }
 }
 
@@ -261,14 +267,14 @@ impl<R: Reader> FallibleIterator for ArangeEntryIter<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{DebugInfoOffset, Format};
-    use endianity::LittleEndian;
-    use read::lookup::LookupParser;
-    use read::EndianSlice;
+    use crate::common::{DebugInfoOffset, Format};
+    use crate::endianity::LittleEndian;
+    use crate::read::lookup::LookupParser;
+    use crate::read::EndianSlice;
 
     #[test]
     fn test_parse_header_ok() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // 32-bit length = 32.
             0x20, 0x00, 0x00, 0x00,
@@ -364,7 +370,7 @@ mod tests {
             offset: DebugInfoOffset(0),
             segment_size: 8,
         };
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // Segment.
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
@@ -401,7 +407,7 @@ mod tests {
             offset: DebugInfoOffset(0),
             segment_size: 0,
         };
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // Zero tuple.
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

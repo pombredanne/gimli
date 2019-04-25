@@ -62,7 +62,7 @@ fn low_bits_of_u64(val: u64) -> u8 {
 #[cfg(feature = "read")]
 pub mod read {
     use super::{low_bits_of_byte, CONTINUATION_BIT, SIGN_BIT};
-    use read::{Error, Reader, Result};
+    use crate::read::{Error, Reader, Result};
 
     /// Read an unsigned LEB128 number from the given `Reader` and
     /// return it or an error if reading failed.
@@ -187,10 +187,26 @@ pub mod write {
 #[cfg(test)]
 mod tests {
     use super::{low_bits_of_byte, low_bits_of_u64, read, write, CONTINUATION_BIT};
-    use endianity::NativeEndian;
-    use read::{EndianSlice, Error};
+    use crate::endianity::NativeEndian;
+    use crate::read::{EndianSlice, Error, ReaderOffsetId};
     use std;
     use std::io;
+
+    trait ResultExt {
+        fn map_eof(self, input: &[u8]) -> Self;
+    }
+
+    impl<T> ResultExt for Result<T, Error> {
+        fn map_eof(self, input: &[u8]) -> Self {
+            match self {
+                Err(Error::UnexpectedEof(id)) => {
+                    let id = ReaderOffsetId(id.0 - input.as_ptr() as u64);
+                    Err(Error::UnexpectedEof(id))
+                }
+                r => r,
+            }
+        }
+    }
 
     #[test]
     fn test_low_bits_of_byte() {
@@ -335,14 +351,20 @@ mod tests {
     fn test_read_unsigned_not_enough_data() {
         let buf = [CONTINUATION_BIT];
         let mut readable = EndianSlice::new(&buf[..], NativeEndian);
-        assert_eq!(read::unsigned(&mut readable), Err(Error::UnexpectedEof));
+        assert_eq!(
+            read::unsigned(&mut readable).map_eof(&buf),
+            Err(Error::UnexpectedEof(ReaderOffsetId(1)))
+        );
     }
 
     #[test]
     fn test_read_signed_not_enough_data() {
         let buf = [CONTINUATION_BIT];
         let mut readable = EndianSlice::new(&buf[..], NativeEndian);
-        assert_eq!(read::signed(&mut readable), Err(Error::UnexpectedEof));
+        assert_eq!(
+            read::signed(&mut readable).map_eof(&buf),
+            Err(Error::UnexpectedEof(ReaderOffsetId(1)))
+        );
     }
 
     #[test]

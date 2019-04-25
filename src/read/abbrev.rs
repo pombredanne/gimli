@@ -1,18 +1,18 @@
 //! Functions for parsing DWARF debugging abbreviations.
 
-use collections::btree_map;
-use vec::Vec;
+use crate::collections::btree_map;
+use crate::vec::Vec;
 
-use common::DebugAbbrevOffset;
-use constants;
-use endianity::Endianity;
-use read::{EndianSlice, Error, Reader, Result, Section, UnitHeader};
+use crate::common::{DebugAbbrevOffset, SectionId};
+use crate::constants;
+use crate::endianity::Endianity;
+use crate::read::{EndianSlice, Error, Reader, Result, Section, UnitHeader};
 
 /// The `DebugAbbrev` struct represents the abbreviations describing
 /// `DebuggingInformationEntry`s' attribute names and forms found in the
 /// `.debug_abbrev` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugAbbrev<R: Reader> {
+pub struct DebugAbbrev<R> {
     debug_abbrev_section: R,
 }
 
@@ -54,13 +54,41 @@ impl<R: Reader> DebugAbbrev<R> {
     }
 }
 
-impl<R: Reader> Section<R> for DebugAbbrev<R> {
-    fn section_name() -> &'static str {
-        ".debug_abbrev"
+impl<T> DebugAbbrev<T> {
+    /// Create a `DebugAbbrev` section that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```rust,no_run
+    /// # let load_section = || unimplemented!();
+    /// // Read the DWARF section into a `Vec` with whatever object loader you're using.
+    /// let owned_section: gimli::DebugAbbrev<Vec<u8>> = load_section();
+    /// // Create a reference to the DWARF section.
+    /// let section = owned_section.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> DebugAbbrev<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        borrow(&self.debug_abbrev_section).into()
     }
 }
 
-impl<R: Reader> From<R> for DebugAbbrev<R> {
+impl<R> Section<R> for DebugAbbrev<R> {
+    fn id() -> SectionId {
+        SectionId::DebugAbbrev
+    }
+
+    fn reader(&self) -> &R {
+        &self.debug_abbrev_section
+    }
+}
+
+impl<R> From<R> for DebugAbbrev<R> {
     fn from(debug_abbrev_section: R) -> Self {
         DebugAbbrev {
             debug_abbrev_section,
@@ -301,7 +329,7 @@ impl AttributeSpecification {
     ///
     /// Note that because some attributes are variably sized, the size cannot
     /// always be known without parsing, in which case we return `None`.
-    pub fn size<R: Reader>(&self, header: &UnitHeader<R, R::Offset>) -> Option<usize> {
+    pub fn size<R: Reader>(&self, header: &UnitHeader<R>) -> Option<usize> {
         match self.form {
             constants::DW_FORM_addr => Some(header.address_size() as usize),
 
@@ -381,16 +409,14 @@ impl AttributeSpecification {
 
 #[cfg(test)]
 pub mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::Section;
     use super::*;
-    use constants;
-    use endianity::LittleEndian;
-    use read::{EndianSlice, Error};
+    use crate::constants;
+    use crate::endianity::LittleEndian;
+    use crate::read::{EndianSlice, Error};
+    use crate::test_util::GimliSectionMethods;
     #[cfg(target_pointer_width = "32")]
     use std::u32;
-    use test_util::GimliSectionMethods;
+    use test_assembler::Section;
 
     pub trait AbbrevSectionMethods {
         fn abbrev(self, code: u64, tag: constants::DwTag, children: constants::DwChildren) -> Self;
@@ -428,7 +454,7 @@ pub mod tests {
     fn test_debug_abbrev_ok() {
         let extra_start = [1, 2, 3, 4];
         let expected_rest = [5, 6, 7, 8];
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = Section::new()
             .append_bytes(&extra_start)
             .abbrev(2, constants::DW_TAG_subprogram, constants::DW_CHILDREN_no)
@@ -579,7 +605,7 @@ pub mod tests {
     #[test]
     fn test_parse_abbreviations_ok() {
         let expected_rest = [1, 2, 3, 4];
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = Section::new()
             .abbrev(2, constants::DW_TAG_subprogram, constants::DW_CHILDREN_no)
                 .abbrev_attr(constants::DW_AT_name, constants::DW_FORM_string)
@@ -632,7 +658,7 @@ pub mod tests {
     #[test]
     fn test_parse_abbreviations_duplicate() {
         let expected_rest = [1, 2, 3, 4];
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = Section::new()
             .abbrev(1, constants::DW_TAG_subprogram, constants::DW_CHILDREN_no)
                 .abbrev_attr(constants::DW_AT_name, constants::DW_FORM_string)
@@ -752,7 +778,7 @@ pub mod tests {
         let buf = &mut EndianSlice::new(&*buf, LittleEndian);
 
         match Abbreviation::parse(buf) {
-            Err(Error::UnexpectedEof) => {}
+            Err(Error::UnexpectedEof(_)) => {}
             otherwise => panic!("Unexpected result: {:?}", otherwise),
         }
     }

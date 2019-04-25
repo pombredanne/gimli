@@ -1,9 +1,9 @@
 use fallible_iterator::FallibleIterator;
 
-use common::DebugInfoOffset;
-use endianity::Endianity;
-use read::lookup::{DebugLookup, LookupEntryIter, PubStuffEntry, PubStuffParser};
-use read::{EndianSlice, Error, Reader, Result, Section, UnitOffset};
+use crate::common::{DebugInfoOffset, SectionId};
+use crate::endianity::Endianity;
+use crate::read::lookup::{DebugLookup, LookupEntryIter, PubStuffEntry, PubStuffParser};
+use crate::read::{EndianSlice, Error, Reader, Result, Section, UnitOffset};
 
 /// A single parsed pubtype.
 #[derive(Debug, Clone)]
@@ -97,8 +97,12 @@ impl<R: Reader> DebugPubTypes<R> {
 }
 
 impl<R: Reader> Section<R> for DebugPubTypes<R> {
-    fn section_name() -> &'static str {
-        ".debug_pubtypes"
+    fn id() -> SectionId {
+        SectionId::DebugPubTypes
+    }
+
+    fn reader(&self) -> &R {
+        self.0.reader()
     }
 }
 

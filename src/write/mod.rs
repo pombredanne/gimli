@@ -1,8 +1,68 @@
-//! Low level functionality for writing DWARF debugging information.
+//! Write DWARF debugging information.
+//!
+//! ## API Structure
+//!
+//! This module works by building up a representation of the debugging information
+//! in memory, and then writing it all at once. It supports two major use cases:
+//!
+//! * Use the [`DwarfUnit`](./struct.DwarfUnit.html) type when writing DWARF
+//! for a single compilation unit.
+//!
+//! * Use the [`Dwarf`](./struct.Dwarf.html) type when writing DWARF for multiple
+//! compilation units.
+//!
+//! The module also supports reading in DWARF debugging information and writing it out
+//! again, possibly after modifying it. Create a [`read::Dwarf`](../read/struct.Dwarf.html)
+//! instance, and then use [`Dwarf::from`](./struct.Dwarf.html#method.from) to convert
+//! it to a writable instance.
+//!
+//! ## Example Usage
+//!
+//! Write a compilation unit containing only the top level DIE.
+//!
+//! ```rust
+//! use gimli::write::{
+//!     Address, AttributeValue, DwarfUnit, EndianVec, Error, Range, RangeList, Sections,
+//! };
+//!
+//! fn example() -> Result<(), Error> {
+//!     // Choose the encoding parameters.
+//!     let encoding = gimli::Encoding {
+//!         format: gimli::Format::Dwarf32,
+//!         version: 5,
+//!         address_size: 8,
+//!     };
+//!     // Create a container for a single compilation unit.
+//!     let mut dwarf = DwarfUnit::new(encoding);
+//!     // Set a range attribute on the root DIE.
+//!     let range_list = RangeList(vec![Range::StartLength {
+//!         begin: Address::Constant(0x100),
+//!         length: 42,
+//!     }]);
+//!     let range_list_id = dwarf.unit.ranges.add(range_list);
+//!     let root = dwarf.unit.root();
+//!     dwarf.unit.get_mut(root).set(
+//!         gimli::DW_AT_ranges,
+//!         AttributeValue::RangeListRef(range_list_id),
+//!     );
+//!     // Create a `Vec` for each DWARF section.
+//!     let mut sections = Sections::new(EndianVec::new(gimli::LittleEndian));
+//!     // Finally, write the DWARF data to the sections.
+//!     dwarf.write(&mut sections)?;
+//!     sections.for_each(|id, data| {
+//!         // Here you can add the data to the output object file.
+//!         Ok(())
+//!     })
+//! }
+//! # fn main() {
+//! #     example().unwrap();
+//! # }
 
 use std::error;
 use std::fmt;
 use std::result;
+
+use crate::constants;
 
 mod endian_vec;
 pub use self::endian_vec::*;
@@ -72,23 +132,26 @@ macro_rules! define_offsets {
     };
 }
 
-mod dwarf;
-pub use self::dwarf::*;
-
 mod abbrev;
 pub use self::abbrev::*;
 
+mod cfi;
+pub use self::cfi::*;
+
+mod dwarf;
+pub use self::dwarf::*;
+
 mod line;
 pub use self::line::*;
+
+mod range;
+pub use self::range::*;
 
 mod str;
 pub use self::str::*;
 
 mod unit;
 pub use self::unit::*;
-
-mod range;
-pub use self::range::*;
 
 /// An error that occurred when writing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +180,12 @@ pub enum Error {
     InvalidRange,
     /// The line number program encoding is incompatible with the unit encoding.
     IncompatibleLineProgramEncoding,
+    /// Could not encode code offset for a frame instruction.
+    InvalidFrameCodeOffset(u32),
+    /// Could not encode data offset for a frame instruction.
+    InvalidFrameDataOffset(i32),
+    /// Unsupported eh_frame pointer encoding.
+    UnsupportedPointerEncoding(constants::DwEhPe),
 }
 
 impl fmt::Display for Error {
@@ -150,6 +219,19 @@ impl fmt::Display for Error {
                 f,
                 "The line number program encoding is incompatible with the unit encoding."
             ),
+            Error::InvalidFrameCodeOffset(offset) => write!(
+                f,
+                "Could not encode code offset ({}) for a frame instruction.",
+                offset,
+            ),
+            Error::InvalidFrameDataOffset(offset) => write!(
+                f,
+                "Could not encode data offset ({}) for a frame instruction.",
+                offset,
+            ),
+            Error::UnsupportedPointerEncoding(eh_pe) => {
+                write!(f, "Unsupported eh_frame pointer encoding ({}).", eh_pe)
+            }
         }
     }
 }
@@ -162,10 +244,10 @@ pub type Result<T> = result::Result<T, Error>;
 /// An address.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Address {
-    /// An absolute address that does not require relocation.
-    Absolute(u64),
+    /// A fixed address that does not require relocation.
+    Constant(u64),
     /// An address that is relative to a symbol which may be relocated.
-    Relative {
+    Symbol {
         /// The symbol that the address is relative to.
         ///
         /// The meaning of this value is decided by the writer, but
@@ -190,7 +272,7 @@ struct BaseId(usize);
 impl Default for BaseId {
     fn default() -> Self {
         use std::sync::atomic;
-        static BASE_ID: atomic::AtomicUsize = atomic::ATOMIC_USIZE_INIT;
+        static BASE_ID: atomic::AtomicUsize = atomic::AtomicUsize::new(0);
         BaseId(BASE_ID.fetch_add(1, atomic::Ordering::Relaxed))
     }
 }
@@ -198,7 +280,7 @@ impl Default for BaseId {
 #[cfg(feature = "read")]
 mod convert {
     use super::*;
-    use read;
+    use crate::read;
 
     pub(crate) use super::unit::convert::*;
 
@@ -233,6 +315,10 @@ mod convert {
         InvalidLineRef,
         /// Invalid relative address in a range list.
         InvalidRangeRelativeAddress,
+        /// Writing this CFI instruction is not implemented yet.
+        UnsupportedCfiInstruction,
+        /// Writing indirect pointers is not implemented yet.
+        UnsupportedIndirectAddress,
     }
 
     impl fmt::Display for ConvertError {
@@ -274,6 +360,12 @@ mod convert {
                 InvalidLineRef => write!(f, "A `.debug_line` reference is invalid."),
                 InvalidRangeRelativeAddress => {
                     write!(f, "Invalid relative address in a range list.")
+                }
+                UnsupportedCfiInstruction => {
+                    write!(f, "Writing this CFI instruction is not implemented yet.")
+                }
+                UnsupportedIndirectAddress => {
+                    write!(f, "Writing indirect pointers is not implemented yet.")
                 }
             }
         }

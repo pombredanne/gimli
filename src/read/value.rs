@@ -2,8 +2,8 @@
 
 use std::mem;
 
-use constants;
-use read::{AttributeValue, DebuggingInformationEntry, Error, Reader, Result};
+use crate::constants;
+use crate::read::{AttributeValue, DebuggingInformationEntry, Error, Reader, Result};
 
 /// Convert a u64 to an i64, with sign extension if required.
 ///
@@ -108,7 +108,7 @@ impl ValueType {
 
     /// Construct a `ValueType` from a base type DIE.
     pub fn from_entry<R: Reader>(
-        entry: &DebuggingInformationEntry<R, R::Offset>,
+        entry: &DebuggingInformationEntry<R>,
     ) -> Result<Option<ValueType>> {
         if entry.tag() != constants::DW_TAG_base_type {
             return Ok(None);
@@ -906,15 +906,15 @@ impl Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{DebugAbbrevOffset, Encoding, Format};
-    use endianity::LittleEndian;
-    use read::{
+    use crate::common::{DebugAbbrevOffset, Encoding, Format};
+    use crate::endianity::LittleEndian;
+    use crate::read::{
         Abbreviation, AttributeSpecification, DebuggingInformationEntry, EndianSlice, UnitHeader,
         UnitOffset,
     };
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn valuetype_from_encoding() {
         let encoding = Encoding {
             format: Format::Dwarf32,
@@ -1007,7 +1007,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_reinterpret() {
         let addr_mask = !0 >> 32;
         for &(v, t, result) in &[
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_abs() {
         let addr_mask = 0xffff_ffff;
         for &(v, result) in &[
@@ -1066,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_neg() {
         let addr_mask = 0xffff_ffff;
         for &(v, result) in &[
@@ -1087,7 +1087,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_add() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1109,7 +1109,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_sub() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_mul() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1153,7 +1153,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_div() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1190,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_rem() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_not() {
         let addr_mask = 0xffff_ffff;
         for &(v, result) in &[
@@ -1246,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_and() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_or() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_xor() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_shl() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1351,7 +1351,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_shr() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[
@@ -1386,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(rustfmt, rustfmt_skip)]
+    #[rustfmt::skip]
     fn value_shra() {
         let addr_mask = 0xffff_ffff;
         for &(v1, v2, result) in &[

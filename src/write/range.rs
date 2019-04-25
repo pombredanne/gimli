@@ -1,9 +1,9 @@
+use crate::vec::Vec;
 use indexmap::IndexSet;
 use std::ops::{Deref, DerefMut};
-use vec::Vec;
 
-use common::{Encoding, RangeListsOffset};
-use write::{Address, BaseId, Error, Result, Section, SectionId, Sections, Writer};
+use crate::common::{Encoding, RangeListsOffset, SectionId};
+use crate::write::{Address, BaseId, Error, Result, Section, Sections, Writer};
 
 define_section!(
     DebugRanges,
@@ -51,7 +51,7 @@ impl RangeListTable {
         }
 
         match encoding.version {
-            2...4 => self.write_ranges(&mut sections.debug_ranges, encoding.address_size),
+            2..=4 => self.write_ranges(&mut sections.debug_ranges, encoding.address_size),
             5 => self.write_rnglists(&mut sections.debug_rnglists, encoding),
             _ => Err(Error::UnsupportedVersion(encoding.version)),
         }
@@ -73,15 +73,15 @@ impl RangeListTable {
                 match *range {
                     Range::BaseAddress { address } => {
                         let marker = !0 >> (64 - address_size * 8);
-                        w.write_word(marker, address_size)?;
+                        w.write_udata(marker, address_size)?;
                         w.write_address(address, address_size)?;
                     }
                     Range::OffsetPair { begin, end } => {
                         if begin == end {
                             return Err(Error::InvalidRange);
                         }
-                        w.write_word(begin, address_size)?;
-                        w.write_word(end, address_size)?;
+                        w.write_udata(begin, address_size)?;
+                        w.write_udata(end, address_size)?;
                     }
                     Range::StartEnd { begin, end } => {
                         if begin == end {
@@ -92,8 +92,8 @@ impl RangeListTable {
                     }
                     Range::StartLength { begin, length } => {
                         let end = match begin {
-                            Address::Absolute(begin) => Address::Absolute(begin + length),
-                            Address::Relative { symbol, addend } => Address::Relative {
+                            Address::Constant(begin) => Address::Constant(begin + length),
+                            Address::Symbol { symbol, addend } => Address::Symbol {
                                 symbol,
                                 addend: addend + length as i64,
                             },
@@ -106,8 +106,8 @@ impl RangeListTable {
                     }
                 }
             }
-            w.write_word(0, address_size)?;
-            w.write_word(0, address_size)?;
+            w.write_udata(0, address_size)?;
+            w.write_udata(0, address_size)?;
         }
         Ok(RangeListOffsets {
             base_id: self.base_id,
@@ -141,28 +141,28 @@ impl RangeListTable {
             for range in &range_list.0 {
                 match *range {
                     Range::BaseAddress { address } => {
-                        w.write_u8(::constants::DW_RLE_base_address.0)?;
+                        w.write_u8(crate::constants::DW_RLE_base_address.0)?;
                         w.write_address(address, encoding.address_size)?;
                     }
                     Range::OffsetPair { begin, end } => {
-                        w.write_u8(::constants::DW_RLE_offset_pair.0)?;
+                        w.write_u8(crate::constants::DW_RLE_offset_pair.0)?;
                         w.write_uleb128(begin)?;
                         w.write_uleb128(end)?;
                     }
                     Range::StartEnd { begin, end } => {
-                        w.write_u8(::constants::DW_RLE_start_end.0)?;
+                        w.write_u8(crate::constants::DW_RLE_start_end.0)?;
                         w.write_address(begin, encoding.address_size)?;
                         w.write_address(end, encoding.address_size)?;
                     }
                     Range::StartLength { begin, length } => {
-                        w.write_u8(::constants::DW_RLE_start_length.0)?;
+                        w.write_u8(crate::constants::DW_RLE_start_length.0)?;
                         w.write_address(begin, encoding.address_size)?;
                         w.write_uleb128(length)?;
                     }
                 }
             }
 
-            w.write_u8(::constants::DW_RLE_end_of_list.0)?;
+            w.write_u8(crate::constants::DW_RLE_end_of_list.0)?;
         }
 
         let length = (w.len() - length_base) as u64;
@@ -214,8 +214,8 @@ pub enum Range {
 mod convert {
     use super::*;
 
-    use read::{self, Reader};
-    use write::{ConvertError, ConvertResult, ConvertUnitContext};
+    use crate::read::{self, Reader};
+    use crate::write::{ConvertError, ConvertResult, ConvertUnitContext};
 
     impl RangeList {
         /// Create a range list by reading the data from the give range list iter.
@@ -223,7 +223,7 @@ mod convert {
             mut from: read::RawRngListIter<R>,
             context: &ConvertUnitContext<R>,
         ) -> ConvertResult<Self> {
-            let mut have_base_address = context.base_address != Address::Absolute(0);
+            let mut have_base_address = context.base_address != Address::Constant(0);
             let convert_address =
                 |x| (context.convert_address)(x).ok_or(ConvertError::InvalidAddress);
             let mut ranges = Vec::new();
@@ -234,7 +234,7 @@ mod convert {
                         let begin = convert_address(begin)?;
                         let end = convert_address(end)?;
                         match (begin, end) {
-                            (Address::Absolute(begin_offset), Address::Absolute(end_offset)) => {
+                            (Address::Constant(begin_offset), Address::Constant(end_offset)) => {
                                 if have_base_address {
                                     Range::OffsetPair {
                                         begin: begin_offset,
@@ -296,15 +296,15 @@ mod convert {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::{
+    use crate::common::{
         DebugAbbrevOffset, DebugAddrBase, DebugInfoOffset, DebugLocListsBase, DebugRngListsBase,
         DebugStrOffsetsBase, Format, UnitSectionOffset,
     };
-    use read;
-    use write::{
+    use crate::read;
+    use crate::write::{
         ConvertUnitContext, EndianVec, LineStringTable, Range, RangeListTable, StringTable,
     };
-    use LittleEndian;
+    use crate::LittleEndian;
 
     #[test]
     fn test_range() {
@@ -322,15 +322,15 @@ mod tests {
 
                     let mut range_list = RangeList(vec![
                         Range::StartLength {
-                            begin: Address::Absolute(6666),
+                            begin: Address::Constant(6666),
                             length: 7777,
                         },
                         Range::StartEnd {
-                            begin: Address::Absolute(4444),
-                            end: Address::Absolute(5555),
+                            begin: Address::Constant(4444),
+                            end: Address::Constant(5555),
                         },
                         Range::BaseAddress {
-                            address: Address::Absolute(1111),
+                            address: Address::Constant(1111),
                         },
                         Range::OffsetPair {
                             begin: 2222,
@@ -380,8 +380,8 @@ mod tests {
                         line_strings: &mut line_strings,
                         strings: &mut strings,
                         ranges: &mut ranges,
-                        convert_address: &|address| Some(Address::Absolute(address)),
-                        base_address: Address::Absolute(0),
+                        convert_address: &|address| Some(Address::Constant(address)),
+                        base_address: Address::Constant(0),
                         line_program_offset: None,
                         line_program_files: Vec::new(),
                     };
@@ -389,8 +389,8 @@ mod tests {
 
                     if version <= 4 {
                         range_list.0[0] = Range::StartEnd {
-                            begin: Address::Absolute(6666),
-                            end: Address::Absolute(6666 + 7777),
+                            begin: Address::Constant(6666),
+                            end: Address::Constant(6666 + 7777),
                         };
                     }
                     assert_eq!(range_list, convert_range_list);

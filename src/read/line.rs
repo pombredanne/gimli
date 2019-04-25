@@ -1,19 +1,19 @@
+use crate::vec::Vec;
 use std::fmt;
 use std::result;
-use vec::Vec;
 
-use common::{
+use crate::common::{
     DebugLineOffset, DebugLineStrOffset, DebugStrOffset, DebugStrOffsetsIndex, Encoding, Format,
-    LineEncoding,
+    LineEncoding, SectionId,
 };
-use constants;
-use endianity::Endianity;
-use read::{AttributeValue, EndianSlice, Error, Reader, ReaderOffset, Result, Section};
+use crate::constants;
+use crate::endianity::Endianity;
+use crate::read::{AttributeValue, EndianSlice, Error, Reader, ReaderOffset, Result, Section};
 
 /// The `DebugLine` struct contains the source location to instruction mapping
 /// found in the `.debug_line` section.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct DebugLine<R: Reader> {
+pub struct DebugLine<R> {
     debug_line_section: R,
 }
 
@@ -71,7 +71,7 @@ impl<R: Reader> DebugLine<R> {
         address_size: u8,
         comp_dir: Option<R>,
         comp_name: Option<R>,
-    ) -> Result<IncompleteLineProgram<R, R::Offset>> {
+    ) -> Result<IncompleteLineProgram<R>> {
         let input = &mut self.debug_line_section.clone();
         input.skip(offset.0)?;
         let header = LineProgramHeader::parse(input, offset, address_size, comp_dir, comp_name)?;
@@ -80,13 +80,41 @@ impl<R: Reader> DebugLine<R> {
     }
 }
 
-impl<R: Reader> Section<R> for DebugLine<R> {
-    fn section_name() -> &'static str {
-        ".debug_line"
+impl<T> DebugLine<T> {
+    /// Create a `DebugLine` section that references the data in `self`.
+    ///
+    /// This is useful when `R` implements `Reader` but `T` does not.
+    ///
+    /// ## Example Usage
+    ///
+    /// ```rust,no_run
+    /// # let load_section = || unimplemented!();
+    /// // Read the DWARF section into a `Vec` with whatever object loader you're using.
+    /// let owned_section: gimli::DebugLine<Vec<u8>> = load_section();
+    /// // Create a reference to the DWARF section.
+    /// let section = owned_section.borrow(|section| {
+    ///     gimli::EndianSlice::new(&section, gimli::LittleEndian)
+    /// });
+    /// ```
+    pub fn borrow<'a, F, R>(&'a self, mut borrow: F) -> DebugLine<R>
+    where
+        F: FnMut(&'a T) -> R,
+    {
+        borrow(&self.debug_line_section).into()
     }
 }
 
-impl<R: Reader> From<R> for DebugLine<R> {
+impl<R> Section<R> for DebugLine<R> {
+    fn id() -> SectionId {
+        SectionId::DebugLine
+    }
+
+    fn reader(&self) -> &R {
+        &self.debug_line_section
+    }
+}
+
+impl<R> From<R> for DebugLine<R> {
     fn from(debug_line_section: R) -> Self {
         DebugLine { debug_line_section }
     }
@@ -94,12 +122,12 @@ impl<R: Reader> From<R> for DebugLine<R> {
 
 /// Deprecated. `LineNumberProgram` has been renamed to `LineProgram`.
 #[deprecated(note = "LineNumberProgram has been renamed to LineProgram, use that instead.")]
-pub type LineNumberProgram<R, Offset> = LineProgram<R, Offset>;
+pub type LineNumberProgram<R, Offset> = dyn LineProgram<R, Offset>;
 
 /// A `LineProgram` provides access to a `LineProgramHeader` and
 /// a way to add files to the files table if necessary. Gimli consumers should
 /// never need to use or see this trait.
-pub trait LineProgram<R, Offset = usize>
+pub trait LineProgram<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -146,7 +174,7 @@ pub type StateMachine<R, Program, Offset> = LineRows<R, Program, Offset>;
 /// to expand the byte-coded instruction stream into a matrix of line number
 /// information." -- Section 6.2.1
 #[derive(Debug, Clone)]
-pub struct LineRows<R, Program, Offset = usize>
+pub struct LineRows<R, Program, Offset = <R as Reader>::Offset>
 where
     Program: LineProgram<R, Offset>,
     R: Reader<Offset = Offset>,
@@ -157,9 +185,10 @@ where
     instructions: LineInstructions<R>,
 }
 
-type OneShotLineRows<R, Offset = usize> = LineRows<R, IncompleteLineProgram<R, Offset>, Offset>;
+type OneShotLineRows<R, Offset = <R as Reader>::Offset> =
+    LineRows<R, IncompleteLineProgram<R, Offset>, Offset>;
 
-type ResumedLineRows<'program, R, Offset = usize> =
+type ResumedLineRows<'program, R, Offset = <R as Reader>::Offset> =
     LineRows<R, &'program CompleteLineProgram<R, Offset>, Offset>;
 
 impl<R, Program, Offset> LineRows<R, Program, Offset>
@@ -238,7 +267,7 @@ pub type Opcode<R> = LineInstruction<R, <R as Reader>::Offset>;
 
 /// A parsed line number program instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LineInstruction<R, Offset = usize>
+pub enum LineInstruction<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -378,9 +407,9 @@ where
     Offset: ReaderOffset,
 {
     fn parse<'header>(
-        header: &'header LineProgramHeader<R, R::Offset>,
+        header: &'header LineProgramHeader<R>,
         input: &mut R,
-    ) -> Result<LineInstruction<R, R::Offset>>
+    ) -> Result<LineInstruction<R>>
     where
         R: 'header,
     {
@@ -580,8 +609,8 @@ impl<R: Reader> LineInstructions<R> {
     #[inline(always)]
     pub fn next_instruction(
         &mut self,
-        header: &LineProgramHeader<R, R::Offset>,
-    ) -> Result<Option<LineInstruction<R, R::Offset>>> {
+        header: &LineProgramHeader<R>,
+    ) -> Result<Option<LineInstruction<R>>> {
         if self.input.is_empty() {
             return Ok(None);
         }
@@ -621,7 +650,7 @@ pub struct LineRow {
 
 impl LineRow {
     /// Create a line number row in the initial state for the given program.
-    pub fn new<R: Reader>(header: &LineProgramHeader<R, R::Offset>) -> Self {
+    pub fn new<R: Reader>(header: &LineProgramHeader<R>) -> Self {
         LineRow {
             // "At the beginning of each sequence within a line number program, the
             // state of the registers is:" -- Section 6.2.2
@@ -675,8 +704,8 @@ impl LineRow {
     #[inline]
     pub fn file<'header, R: Reader>(
         &self,
-        header: &'header LineProgramHeader<R, R::Offset>,
-    ) -> Option<&'header FileEntry<R, R::Offset>> {
+        header: &'header LineProgramHeader<R>,
+    ) -> Option<&'header FileEntry<R>> {
         header.file(self.file)
     }
 
@@ -776,11 +805,11 @@ impl LineRow {
     #[inline]
     pub fn execute<R, Program>(
         &mut self,
-        instruction: LineInstruction<R, R::Offset>,
+        instruction: LineInstruction<R>,
         program: &mut Program,
     ) -> bool
     where
-        Program: LineProgram<R, R::Offset>,
+        Program: LineProgram<R>,
         R: Reader,
     {
         match instruction {
@@ -880,7 +909,7 @@ impl LineRow {
 
     /// Perform any reset that was required after copying the previous row.
     #[inline]
-    pub fn reset<R: Reader>(&mut self, header: &LineProgramHeader<R, R::Offset>) {
+    pub fn reset<R: Reader>(&mut self, header: &LineProgramHeader<R>) {
         if self.end_sequence {
             // Previous instruction was EndSequence, so reset everything
             // as specified in Section 6.2.5.3.
@@ -915,7 +944,7 @@ impl LineRow {
     fn apply_operation_advance<R: Reader>(
         &mut self,
         operation_advance: u64,
-        header: &LineProgramHeader<R, R::Offset>,
+        header: &LineProgramHeader<R>,
     ) {
         let minimum_instruction_length = u64::from(header.line_encoding.minimum_instruction_length);
         let maximum_operations_per_instruction =
@@ -933,16 +962,12 @@ impl LineRow {
     }
 
     #[inline]
-    fn adjust_opcode<R: Reader>(&self, opcode: u8, header: &LineProgramHeader<R, R::Offset>) -> u8 {
+    fn adjust_opcode<R: Reader>(&self, opcode: u8, header: &LineProgramHeader<R>) -> u8 {
         opcode - header.opcode_base
     }
 
     /// Section 6.2.5.1
-    fn exec_special_opcode<R: Reader>(
-        &mut self,
-        opcode: u8,
-        header: &LineProgramHeader<R, R::Offset>,
-    ) {
+    fn exec_special_opcode<R: Reader>(&mut self, opcode: u8, header: &LineProgramHeader<R>) {
         let adjusted_opcode = self.adjust_opcode(opcode, header);
 
         let line_range = header.line_encoding.line_range;
@@ -995,7 +1020,7 @@ pub type LineNumberProgramHeader<R, Offset> = LineProgramHeader<R, Offset>;
 /// A header for a line number program in the `.debug_line` section, as defined
 /// in section 6.2.4 of the standard.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LineProgramHeader<R, Offset = usize>
+pub struct LineProgramHeader<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -1402,7 +1427,7 @@ pub type IncompleteLineNumberProgram<R, Offset> = IncompleteLineProgram<R, Offse
 
 /// A line number program that has not been run to completion.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IncompleteLineProgram<R, Offset = usize>
+pub struct IncompleteLineProgram<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -1495,7 +1520,7 @@ pub type CompleteLineNumberProgram<R, Offset> = CompleteLineProgram<R, Offset>;
 
 /// A line number program that has previously been run to completion.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompleteLineProgram<R, Offset = usize>
+pub struct CompleteLineProgram<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -1544,7 +1569,7 @@ where
 
 /// An entry in the `LineProgramHeader`'s `file_names` set.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub struct FileEntry<R, Offset = usize>
+pub struct FileEntry<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -1605,10 +1630,7 @@ where
     /// Get this file's directory.
     ///
     /// A directory index of 0 corresponds to the compilation unit directory.
-    pub fn directory(
-        &self,
-        header: &LineProgramHeader<R, R::Offset>,
-    ) -> Option<AttributeValue<R, Offset>> {
+    pub fn directory(&self, header: &LineProgramHeader<R>) -> Option<AttributeValue<R, Offset>> {
         header.directory(self.directory_index)
     }
 
@@ -1688,7 +1710,7 @@ fn parse_directory_v5<R: Reader>(
     input: &mut R,
     encoding: Encoding,
     formats: &[FileEntryFormat],
-) -> Result<AttributeValue<R, R::Offset>> {
+) -> Result<AttributeValue<R>> {
     let mut path_name = None;
 
     for format in formats {
@@ -1705,7 +1727,7 @@ fn parse_file_v5<R: Reader>(
     input: &mut R,
     encoding: Encoding,
     formats: &[FileEntryFormat],
-) -> Result<FileEntry<R, R::Offset>> {
+) -> Result<FileEntry<R>> {
     let mut path_name = None;
     let mut directory_index = 0;
     let mut timestamp = 0;
@@ -1757,7 +1779,7 @@ fn parse_attribute<R: Reader>(
     input: &mut R,
     encoding: Encoding,
     form: constants::DwForm,
-) -> Result<AttributeValue<R, R::Offset>> {
+) -> Result<AttributeValue<R>> {
     Ok(match form {
         constants::DW_FORM_block1 => {
             let len = input.read_u8().map(R::Offset::from_u8)?;
@@ -1859,19 +1881,17 @@ fn parse_attribute<R: Reader>(
 
 #[cfg(test)]
 mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::{Endian, Label, LabelMaker, Section};
     use super::*;
-    use constants;
-    use endianity::LittleEndian;
-    use read::{EndianSlice, Error};
+    use crate::constants;
+    use crate::endianity::LittleEndian;
+    use crate::read::{EndianSlice, Error};
+    use crate::test_util::GimliSectionMethods;
     use std::u8;
-    use test_util::GimliSectionMethods;
+    use test_assembler::{Endian, Label, LabelMaker, Section};
 
     #[test]
     fn test_parse_debug_line_32_ok() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // 32-bit length = 62.
             0x3e, 0x00, 0x00, 0x00,
@@ -1979,7 +1999,7 @@ mod tests {
 
     #[test]
     fn test_parse_debug_line_header_length_too_short() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // 32-bit length = 62.
             0x3e, 0x00, 0x00, 0x00,
@@ -2033,14 +2053,14 @@ mod tests {
         let input = &mut EndianSlice::new(&buf, LittleEndian);
 
         match LineProgramHeader::parse(input, DebugLineOffset(0), 4, None, None) {
-            Err(Error::UnexpectedEof) => return,
+            Err(Error::UnexpectedEof(_)) => return,
             otherwise => panic!("Unexpected result: {:?}", otherwise),
         }
     }
 
     #[test]
     fn test_parse_debug_line_unit_length_too_short() {
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let buf = [
             // 32-bit length = 40. TOO SHORT!!!
             0x28, 0x00, 0x00, 0x00,
@@ -2094,7 +2114,7 @@ mod tests {
         let input = &mut EndianSlice::new(&buf, LittleEndian);
 
         match LineProgramHeader::parse(input, DebugLineOffset(0), 4, None, None) {
-            Err(Error::UnexpectedEof) => return,
+            Err(Error::UnexpectedEof(_)) => return,
             otherwise => panic!("Unexpected result: {:?}", otherwise),
         }
     }
@@ -2872,7 +2892,7 @@ mod tests {
             let header_start = Label::new();
             let end = Label::new();
             let header_end = Label::new();
-            let mut section = Section::with_endian(Endian::Little)
+            let section = Section::with_endian(Endian::Little)
                 .initial_length(format, &length, &start)
                 .D16(5)
                 // Address size.

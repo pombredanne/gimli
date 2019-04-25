@@ -1,11 +1,11 @@
 //! Functions for parsing and evaluating DWARF expressions.
 
+use crate::vec::Vec;
 use std::mem;
-use vec::Vec;
 
-use common::{DebugAddrIndex, DebugInfoOffset, Encoding, Register};
-use constants;
-use read::{Error, Reader, ReaderOffset, Result, UnitOffset, Value, ValueType};
+use crate::common::{DebugAddrIndex, DebugInfoOffset, Encoding, Register};
+use crate::constants;
+use crate::read::{Error, Reader, ReaderOffset, Result, UnitOffset, Value, ValueType};
 
 /// A reference to a DIE, either relative to the current CU or
 /// relative to the section.
@@ -29,7 +29,7 @@ pub enum DieReference<T = usize> {
 /// example, both `DW_OP_deref` and `DW_OP_xderef` are represented
 /// using `Operation::Deref`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Operation<R, Offset = usize>
+pub enum Operation<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -250,13 +250,13 @@ where
 enum OperationEvaluationResult<R: Reader> {
     Piece,
     Incomplete,
-    Complete { location: Location<R, R::Offset> },
+    Complete { location: Location<R> },
     Waiting(EvaluationWaiting<R>, EvaluationResult<R>),
 }
 
 /// A single location of a piece of the result of a DWARF expression.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Location<R, Offset = usize>
+pub enum Location<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -310,7 +310,7 @@ where
 /// The description of a single piece of the result of a DWARF
 /// expression.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Piece<R, Offset = usize>
+pub struct Piece<R, Offset = <R as Reader>::Offset>
 where
     R: Reader<Offset = Offset>,
     Offset: ReaderOffset,
@@ -958,7 +958,7 @@ pub struct Evaluation<R: Reader> {
     // is stored here while evaluating the subroutine.
     expression_stack: Vec<(R, R)>,
 
-    result: Vec<Piece<R, R::Offset>>,
+    result: Vec<Piece<R>>,
 }
 
 impl<R: Reader> Evaluation<R> {
@@ -1402,7 +1402,7 @@ impl<R: Reader> Evaluation<R> {
     ///
     /// # Panics
     /// Panics if this `Evaluation` has not been driven to completion.
-    pub fn result(self) -> Vec<Piece<R, R::Offset>> {
+    pub fn result(self) -> Vec<Piece<R>> {
         match self.state {
             EvaluationState::Complete => self.result,
             _ => {
@@ -1784,17 +1784,15 @@ impl<R: Reader> Evaluation<R> {
 
 #[cfg(test)]
 mod tests {
-    extern crate test_assembler;
-
-    use self::test_assembler::{Endian, Section};
     use super::*;
-    use common::Format;
-    use constants;
-    use endianity::LittleEndian;
-    use leb128;
-    use read::{EndianSlice, Error, Result, UnitOffset};
+    use crate::common::Format;
+    use crate::constants;
+    use crate::endianity::LittleEndian;
+    use crate::leb128;
+    use crate::read::{EndianSlice, Error, Result, UnitOffset};
+    use crate::test_util::GimliSectionMethods;
     use std::usize;
-    use test_util::GimliSectionMethods;
+    use test_assembler::{Endian, Section};
 
     fn encoding4() -> Encoding {
         Encoding {
@@ -1864,6 +1862,18 @@ mod tests {
         }
     }
 
+    fn check_op_parse_eof(input: &[u8], encoding: Encoding) {
+        let buf = EndianSlice::new(input, LittleEndian);
+        let mut pc = buf;
+        match Operation::parse(&mut pc, &buf, encoding) {
+            Err(Error::UnexpectedEof(id)) => {
+                assert!(buf.lookup_offset_id(id).is_some());
+            }
+
+            _ => panic!("Unexpected result"),
+        }
+    }
+
     fn check_op_parse<F>(
         input: F,
         expect: &Operation<EndianSlice<LittleEndian>>,
@@ -1875,7 +1885,7 @@ mod tests {
             .get_contents()
             .unwrap();
         for i in 1..input.len() {
-            check_op_parse_failure(&input[..i], Error::UnexpectedEof, encoding);
+            check_op_parse_eof(&input[..i], encoding);
         }
         check_op_parse_simple(&input, expect, encoding);
     }
@@ -1886,7 +1896,7 @@ mod tests {
         let encoding = encoding4();
 
         // Test all single-byte opcodes.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let inputs = [
             (
                 constants::DW_OP_deref,
@@ -2002,7 +2012,7 @@ mod tests {
         ];
 
         let input = [];
-        check_op_parse_failure(&input[..], Error::UnexpectedEof, encoding);
+        check_op_parse_eof(&input[..], encoding);
 
         for item in inputs.iter() {
             let (opcode, ref result) = *item;
@@ -2768,13 +2778,13 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Indices of marks in the assembly.
         let done = 0;
         let fail = 1;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_const1u), U8(23),
             Op(DW_OP_const1s), U8((-23i8) as u8),
@@ -2939,13 +2949,13 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Indices of marks in the assembly.
         let done = 0;
         let fail = 1;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_const8u), U64(0x1111_2222_3333_4444),
             Op(DW_OP_const8s), U64((-0x1111_2222_3333_4444i64) as u64),
@@ -3014,13 +3024,13 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Indices of marks in the assembly.
         let done = 0;
         let fail = 1;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             // Comparisons are signed.
             Op(DW_OP_const1s), U8(1),
@@ -3081,9 +3091,9 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_lit17),                // -- 17
             Op(DW_OP_dup),                  // -- 17 17
@@ -3119,7 +3129,7 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         let mut program = Vec::new();
         program.push(Op(DW_OP_lit0));
@@ -3176,13 +3186,13 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Indices of marks in the assembly.
         let done = 0;
         let fail = 1;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_addr), U32(0x7fff_ffff),
             Op(DW_OP_deref),
@@ -3303,10 +3313,10 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         for i in 0..32 {
-            #[cfg_attr(rustfmt, rustfmt_skip)]
+            #[rustfmt::skip]
             let program = [
                 Op(DwOp(DW_OP_reg0.0 + i)),
                 // Included only in the "bad" run.
@@ -3329,7 +3339,7 @@ mod tests {
             );
         }
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_regx), Uleb(0x1234)
         ];
@@ -3350,10 +3360,10 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Test `frame_base` and `call_frame_cfa` callbacks.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_fbreg), Sleb((-8i8) as u64),
             Op(DW_OP_call_frame_cfa),
@@ -3391,7 +3401,7 @@ mod tests {
         );
 
         // Test `evaluate_entry_value` callback.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_entry_value), Uleb(8), U64(0x1234_5678),
             Op(DW_OP_stack_value)
@@ -3424,7 +3434,7 @@ mod tests {
         );
 
         // Test missing `object_address` field.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_push_object_address),
         ];
@@ -3440,7 +3450,7 @@ mod tests {
         );
 
         // Test `object_address` field.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_push_object_address),
             Op(DW_OP_stack_value),
@@ -3465,7 +3475,7 @@ mod tests {
         );
 
         // Test `initial_value` field.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
         ];
 
@@ -3493,9 +3503,9 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_stack_value)
         ];
@@ -3508,9 +3518,9 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_lit23),
             Op(DW_OP_call2), U16(0x7755),
@@ -3608,10 +3618,10 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         // Example from DWARF 2.6.1.3.
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_reg3),
             Op(DW_OP_piece), Uleb(4),
@@ -3640,7 +3650,7 @@ mod tests {
 
         // Example from DWARF 2.6.1.3 (but hacked since dealing with fbreg
         // in the tests is a pain).
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_reg0),
             Op(DW_OP_piece), Uleb(4),
@@ -3692,7 +3702,7 @@ mod tests {
             },
         );
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_implicit_value), Uleb(5),
             U8(23), U8(24), U8(25), U8(26), U8(0),
@@ -3710,7 +3720,7 @@ mod tests {
 
         check_eval(&program, Ok(&result), encoding4());
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_lit7),
             Op(DW_OP_stack_value),
@@ -3735,7 +3745,7 @@ mod tests {
 
         check_eval(&program, Ok(&result), encoding4());
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_lit7),
         ];
@@ -3748,7 +3758,7 @@ mod tests {
 
         check_eval(&program, Ok(&result), encoding4());
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_implicit_pointer), U32(0x1234_5678), Sleb(0x123),
         ];
@@ -3764,7 +3774,7 @@ mod tests {
 
         check_eval(&program, Ok(&result), encoding4());
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_reg3),
             Op(DW_OP_piece), Uleb(4),
@@ -3773,7 +3783,7 @@ mod tests {
 
         check_eval(&program, Err(Error::InvalidPiece), encoding4());
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Op(DW_OP_reg3),
             Op(DW_OP_piece), Uleb(4),
@@ -3788,9 +3798,9 @@ mod tests {
         // It's nice if an operation and its arguments can fit on a single
         // line in the test program.
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let program = [
             Mark(1),
             Op(DW_OP_skip), Branch(1),
@@ -3810,7 +3820,7 @@ mod tests {
     #[test]
     fn test_eval_typed_stack() {
         use self::AssemblerEntry::*;
-        use constants::*;
+        use crate::constants::*;
 
         let base_types = [
             ValueType::Generic,
@@ -3820,7 +3830,7 @@ mod tests {
         ];
 
         // TODO: convert, reinterpret
-        #[cfg_attr(rustfmt, rustfmt_skip)]
+        #[rustfmt::skip]
         let tests = [
             (
                 &[
